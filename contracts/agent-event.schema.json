@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/schemas/agent-event.schema.json",
+  "title": "PublicAgentEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "run_id",
+    "trace_id",
+    "event_type",
+    "agent_role",
+    "summary",
+    "created_at"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "enum": [
+        "started",
+        "summary",
+        "waiting",
+        "completed",
+        "failed",
+        "heartbeat"
+      ]
+    },
+    "agent_role": {
+      "enum": [
+        "coordinator",
+        "knowledge",
+        "question",
+        "grader",
+        "system"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "retryable",
+        "trace_id"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "trace_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

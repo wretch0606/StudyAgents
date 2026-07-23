@@ -1,0 +1,50 @@
+name: 缺陷报告
+description: 报告可复现的功能、契约或安全问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题摘要
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: input
+    id: trace_id
+    attributes:
+      label: trace_id
+      description: 如有，请填写；不要粘贴密钥或私有数据。
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重程度
+      options:
+        - 阻塞答辩/主链路
+        - 高风险安全或答案泄露
+        - 主要功能异常
+        - 一般问题
+    validations:
+      required: true

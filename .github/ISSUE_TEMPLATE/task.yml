@@ -1,0 +1,55 @@
+name: 开发任务
+description: 创建可验收的一周冲刺任务
+title: "[Task] "
+labels:
+  - task
+body:
+  - type: dropdown
+    id: owner_role
+    attributes:
+      label: 主责角色
+      options:
+        - A - 产品与测试
+        - B - 知识库与 RAG
+        - C - Agent 与提示词
+        - D - 后端、数据库与部署
+        - E - 前端与 E2E
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 用一句话描述完成后的用户或系统能力。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+      description: 列出正常流程、错误流程和可验证结果。
+      placeholder: |
+        - [ ] 正常流程：
+        - [ ] 错误流程：
+        - [ ] 测试：
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依赖与契约影响
+      description: 说明上下游、Schema、Mock、权限或私有字段影响。
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: 目标日期
+      options:
+        - 第 1 天
+        - 第 2 天（集成门）
+        - 第 3 天
+        - 第 4 天（集成门）
+        - 第 5 天
+        - 第 6 天（集成门）
+        - 第 7 天（冻结与答辩）
+    validations:
+      required: true

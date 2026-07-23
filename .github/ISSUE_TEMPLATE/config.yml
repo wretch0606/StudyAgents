@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 协作规则
+    url: https://github.com/wretch0606/StudyAgents/blob/main/CONTRIBUTING.md
+    about: 提交任务前请先阅读分支、PR、契约和测试规则。

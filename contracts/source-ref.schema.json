@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/schemas/source-ref.schema.json",
+  "title": "SourceRef",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document_id",
+    "document_name",
+    "page_no",
+    "chunk_id",
+    "excerpt"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "document_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "page_no": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "question_no": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "chunk_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "excerpt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "page_image_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}
