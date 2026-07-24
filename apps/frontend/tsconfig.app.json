@@ -11,8 +11,7 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
 
-    /* Path aliases */
-    "baseUrl": ".",
+    /* Path aliases (bundler 模式下无需 baseUrl) */
     "paths": {
       "@/*": ["./src/*"]
     }
