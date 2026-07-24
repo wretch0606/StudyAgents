@@ -1,0 +1,11 @@
+{
+  "$comment": "POST /api/auth/login — 登录成功响应，对应 api.ts LoginResponse",
+  "user": {
+    "id": "user-001",
+    "username": "demo",
+    "display_name": "演示用户",
+    "role": "member",
+    "permissions": ["qa:read", "qa:write", "practice:write", "kb:read"]
+  },
+  "csrf_token": "mock-csrf-token-a1b2c3d4e5f6"
+}

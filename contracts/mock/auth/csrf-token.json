@@ -1,0 +1,4 @@
+{
+  "$comment": "GET /api/auth/csrf-token — CSRF Token 响应，对应 api.ts CsrfTokenResponse",
+  "csrf_token": "mock-csrf-token-a1b2c3d4e5f6"
+}

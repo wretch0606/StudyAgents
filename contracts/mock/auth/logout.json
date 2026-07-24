@@ -1,0 +1,4 @@
+{
+  "$comment": "POST /api/auth/logout — 注销响应，对应 api.ts LogoutResponse",
+  "success": true
+}
