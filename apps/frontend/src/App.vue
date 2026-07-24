@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import HelloWorld from './components/HelloWorld.vue'
+// ============================================================
+// StudyAgents — 根组件
+//
+// 仅提供 <router-view> 出口，路由由 src/router/index.ts 控制。
+// ============================================================
 </script>
 
 <template>
-  <HelloWorld />
+  <router-view />
 </template>
