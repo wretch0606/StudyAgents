@@ -1,0 +1,113 @@
+{
+  "$schema": "https://studyagents.local/contracts/mock/qa-success.schema.json",
+  "title": "Mock: 问答成功",
+  "description": "用户提问'光的干涉条件是什么？'，系统成功返回带来源引用的答案。这是学生端收到的完整公开响应。",
+  "scenario": {
+    "mode": "qa",
+    "user_input": "光的干涉条件是什么？"
+  },
+  "public_response": {
+    "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "status": "succeeded",
+    "mode": "qa",
+    "answer": {
+      "conclusion": "两列光波在空间相遇时产生稳定干涉条纹需满足三个条件：频率相同、相位差恒定、振动方向有平行分量。",
+      "reasoning": [
+        "频率相同保证两列波叠加时能形成稳定的强弱分布，若频率不同则干涉图样随时间快速变化无法观测。",
+        "相位差恒定使得特定位置的相位关系不随时间改变，是形成空间固定干涉条纹的必要条件。",
+        "振动方向有平行分量确保两列波的电场矢量能在同一方向上合成——若振动方向完全垂直，则不会发生干涉。"
+      ],
+      "note": "以上内容来自指定资料。若需深入理解杨氏双缝实验的具体公式推导，可继续提问或开始相关章节的专项训练。"
+    },
+    "source_refs": [
+      {
+        "document_id": "d7e8f9a0-b1c2-3456-7890-abcdef123456",
+        "document_name": "光学讲义.pdf",
+        "page_number": 12,
+        "question_no": null,
+        "chunk_id": "c0011223-3445-5678-890a-bcdef1234567",
+        "excerpt": "两列光波在空间相遇时，若满足相干条件，则会产生干涉现象。相干条件包括：1) 频率相同；2) 相位差恒定；3) 振动方向存在平行分量。",
+        "page_image_url": "/api/documents/d7e8f9a0-b1c2-3456-7890-abcdef123456/pages/12/image",
+        "score": 0.042
+      },
+      {
+        "document_id": "d7e8f9a0-b1c2-3456-7890-abcdef123456",
+        "document_name": "光学讲义.pdf",
+        "page_number": 14,
+        "question_no": null,
+        "chunk_id": "c0022334-4556-6789-901a-bcdef1234568",
+        "excerpt": "杨氏双缝干涉实验是验证光波动性的经典实验。条纹间距 Δx = λD/d，其中 λ 为波长，D 为缝到屏距离，d 为双缝间距。",
+        "page_image_url": "/api/documents/d7e8f9a0-b1c2-3456-7890-abcdef123456/pages/14/image",
+        "score": 0.031
+      }
+    ],
+    "agent_events": [
+      {
+        "id": "evt-001",
+        "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sequence_no": 1,
+        "agent": "coordinator",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "协调 Agent 识别为自由问答模式，路由至知识 Agent",
+        "duration_ms": 120,
+        "created_at": "2026-07-26T02:30:00.100Z"
+      },
+      {
+        "id": "evt-002",
+        "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sequence_no": 2,
+        "agent": "knowledge",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "知识 Agent 在第 3 章找到 6 条可引用证据，判断证据充足",
+        "source_refs": [
+          {
+            "document_id": "d7e8f9a0-b1c2-3456-7890-abcdef123456",
+            "document_name": "光学讲义.pdf",
+            "page_number": 12,
+            "question_no": null,
+            "chunk_id": "c0011223-3445-5678-890a-bcdef1234567",
+            "excerpt": "两列光波在空间相遇时，若满足相干条件，则会产生干涉现象...",
+            "score": 0.042
+          }
+        ],
+        "duration_ms": 320,
+        "created_at": "2026-07-26T02:30:00.420Z"
+      },
+      {
+        "id": "evt-003",
+        "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sequence_no": 3,
+        "agent": "evaluator",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "评测讲解 Agent 完成答案组织与引用核验，2 个关键结论均有关联来源",
+        "duration_ms": 180,
+        "created_at": "2026-07-26T02:30:00.600Z"
+      },
+      {
+        "id": "evt-004",
+        "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sequence_no": 4,
+        "agent": "system",
+        "event_type": "run.completed",
+        "status": "succeeded",
+        "summary": "回答完成，共使用 2 次模型调用，总耗时 1.2 秒",
+        "duration_ms": 1200,
+        "created_at": "2026-07-26T02:30:01.200Z"
+      }
+    ],
+    "model_calls": 2,
+    "node_hops": 4,
+    "elapsed_ms": 1200,
+    "created_at": "2026-07-26T02:30:01.200Z"
+  },
+  "$$privacy_check": {
+    "contains_private_answer": false,
+    "contains_rubric": false,
+    "contains_private_evidence": false,
+    "contains_model_chain_of_thought": false,
+    "verdict": "✅ 安全——公开问答响应不含任何私有字段"
+  }
+}

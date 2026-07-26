@@ -1,0 +1,68 @@
+{
+  "$schema": "https://studyagents.local/contracts/mock/qa-refusal.schema.json",
+  "title": "Mock: 问答拒答",
+  "description": "用户提问'量子芯片的制程工艺有哪些？'，但知识库不包含此内容。系统正确拒答。",
+  "scenario": {
+    "mode": "qa",
+    "user_input": "量子芯片的制程工艺有哪些？"
+  },
+  "public_response": {
+    "run_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "status": "succeeded",
+    "mode": "qa",
+    "refusal": {
+      "reason": "topic_mismatch",
+      "message": "当前无法确认该问题的答案。",
+      "searched_scope": "已在全部章节（第1-8章）的讲义、课件和历年真题中检索，未找到与'量子芯片制程工艺'相关的内容。",
+      "suggestion": "本课程知识库目前覆盖几何光学、波动光学和基础量子光学内容，不包含半导体制造工艺。建议：1) 确认问题是否在本课程范围内；2) 若需补充相关资料，请联系管理员上传。",
+      "retry_hint": "您可以换个问法，例如询问'光的波粒二象性'或'光电效应的实验规律'。"
+    },
+    "agent_events": [
+      {
+        "id": "evt-010",
+        "run_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "sequence_no": 1,
+        "agent": "coordinator",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "协调 Agent 识别为自由问答，路由至知识 Agent",
+        "duration_ms": 100,
+        "created_at": "2026-07-26T02:31:00.100Z"
+      },
+      {
+        "id": "evt-011",
+        "run_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "sequence_no": 2,
+        "agent": "knowledge",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "知识 Agent 检索全部章节，未找到匹配证据——主题不匹配",
+        "source_refs": [],
+        "duration_ms": 250,
+        "created_at": "2026-07-26T02:31:00.350Z"
+      },
+      {
+        "id": "evt-012",
+        "run_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "sequence_no": 3,
+        "agent": "system",
+        "event_type": "run.completed",
+        "status": "succeeded",
+        "summary": "已拒答——证据不足（topic_mismatch），知识库未覆盖该主题",
+        "duration_ms": 350,
+        "created_at": "2026-07-26T02:31:00.450Z"
+      }
+    ],
+    "model_calls": 1,
+    "node_hops": 3,
+    "elapsed_ms": 350,
+    "created_at": "2026-07-26T02:31:00.450Z"
+  },
+  "$$privacy_check": {
+    "contains_private_answer": false,
+    "contains_rubric": false,
+    "contains_private_evidence": false,
+    "note": "拒答不引用模型通识补全，仅说明检索范围和补充建议",
+    "verdict": "✅ 安全"
+  }
+}

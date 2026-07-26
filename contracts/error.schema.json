@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/contracts/error.schema.json",
+  "title": "ApiError",
+  "description": "统一错误响应对象。所有 API 错误和 Agent 失败场景均使用此结构。前端根据 retryable 决定是否显示重试按钮，不根据中文文案解析错误类型。",
+  "type": "object",
+  "required": ["code", "message", "retryable", "trace_id"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "description": "错误码，机器可读。前端可据此做条件分支。",
+      "examples": ["AGENT_MODEL_TIMEOUT", "AUTH_INVALID_CREDENTIALS", "KNOWLEDGE_INSUFFICIENT"],
+      "enum": [
+        "AUTH_INVALID_CREDENTIALS",
+        "AUTH_SESSION_EXPIRED",
+        "AUTH_FORBIDDEN",
+        "FILE_UNSUPPORTED_TYPE",
+        "FILE_TOO_LARGE",
+        "DOCUMENT_DUPLICATE",
+        "INGESTION_PARSE_FAILED",
+        "INGESTION_JOB_BUSY",
+        "KNOWLEDGE_INSUFFICIENT",
+        "AGENT_MODEL_TIMEOUT",
+        "AGENT_MODEL_RATE_LIMITED",
+        "AGENT_OUTPUT_INVALID",
+        "AGENT_LIMIT_EXCEEDED",
+        "PRACTICE_STATE_CONFLICT",
+        "GRADE_REVIEW_REQUIRED",
+        "RESOURCE_NOT_FOUND",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "description": "人类可读的中文错误描述，可直接展示给用户"
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "是否可重试。true 时前端展示重试按钮，false 则用户需修改输入后重试"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "跟踪 ID，用于日志关联和问题排查",
+      "examples": ["01JABC123XYZ789"]
+    },
+    "details": {
+      "description": "可选附加信息（如校验失败的具体字段、超时的模型名称等），不可包含 API 密钥或私有答案",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": true }
+      ]
+    }
+  },
+  "additionalProperties": false
+}
