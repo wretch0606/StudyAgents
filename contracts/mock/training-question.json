@@ -1,0 +1,60 @@
+{
+  "$schema": "https://studyagents.local/contracts/mock/training-question.schema.json",
+  "title": "Mock: 训练公开题目（提交答案前）",
+  "description": "专项训练中的一道计算题。这是学生提交答案前前端收到的完整数据。⚠️ 这是最关键的隐私检查场景——必须不含答案、评分点和私有证据。",
+  "scenario": {
+    "mode": "practice",
+    "session_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+    "filters": {
+      "chapter_ids": ["ch-03"],
+      "question_types": ["calculation"],
+      "difficulty": 2
+    },
+    "progress": { "current": 2, "total": 5 }
+  },
+  "public_question": {
+    "item_id": "d4e5f6a7-b8c9-0123-defa-bc1234567890",
+    "order_no": 2,
+    "source_kind": "past_exam",
+    "question_type": "calculation",
+    "difficulty": 2,
+    "stem": "在杨氏双缝干涉实验中，双缝间距 $d = 0.20\\,\\text{mm}$，缝到屏距离 $D = 2.0\\,\\text{m}$。若用波长 $\\lambda = 589\\,\\text{nm}$ 的钠光灯照射，求相邻明条纹的间距 $\\Delta x$。",
+    "options": [],
+    "source_label": "2024 年真题，第 3 题",
+    "progress": { "current": 2, "total": 5 }
+  },
+  "related_agent_events": [
+    {
+      "id": "evt-020",
+      "run_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "sequence_no": 1,
+      "agent": "questioner",
+      "event_type": "agent.summary",
+      "status": "succeeded",
+      "summary": "出题 Agent 从第 3 章选择 1 道真题（计算题，难度 2），置信度 0.94",
+      "source_refs": [],
+      "duration_ms": 150,
+      "created_at": "2026-07-26T02:32:00.150Z"
+    },
+    {
+      "id": "evt-021",
+      "run_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "sequence_no": 2,
+      "agent": "system",
+      "event_type": "run.waiting_user",
+      "status": "waiting_user",
+      "summary": "等待用户提交第 2 题答案（共 5 题）",
+      "duration_ms": 150,
+      "created_at": "2026-07-26T02:32:00.300Z"
+    }
+  ],
+  "$$privacy_check": {
+    "contains_expected_answer": false,
+    "contains_rubric": false,
+    "contains_private_evidence": false,
+    "contains_private_content": false,
+    "expected_answer_hidden": "Δx = λD/d = 589×10⁻⁹ × 2.0 / (0.20×10⁻³) = 5.89×10⁻³ m = 5.89 mm —— 此答案仅服务端存储，前端不可见",
+    "rubric_hidden": "[R1] 列出条纹间距公式 Δx = λD/d (4分) [R2] 统一单位代入数值 (4分) [R3] 计算结果正确 (2分) —— 此评分点不可见",
+    "verdict": "✅ 安全——提交前的公开题目不含答案、评分点和私有证据"
+  }
+}

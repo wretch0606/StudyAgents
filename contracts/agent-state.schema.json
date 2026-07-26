@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/contracts/agent-state.schema.json",
+  "title": "AgentState",
+  "description": "LangGraph 状态图中流转的 AgentState 定义。⚠️ 此结构同时包含公开字段和私有字段——D（后端）负责在序列化到 API 响应/SSE 前剥离私有字段。字段边界以 public/private 标注，不可突破。",
+  "type": "object",
+  "required": [
+    "run_id",
+    "thread_id",
+    "user_id",
+    "mode",
+    "model_calls",
+    "node_hops",
+    "retry_count"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "【公开】本次运行唯一 ID",
+      "visibility": "public"
+    },
+    "thread_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "【公开】会话/训练线程 ID，用于同主题多轮",
+      "visibility": "public"
+    },
+    "user_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "【公开】当前用户 ID",
+      "visibility": "public"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["qa", "practice"],
+      "description": "【公开】运行模式：qa=自由问答，practice=专项训练",
+      "visibility": "public"
+    },
+    "user_input": {
+      "type": "string",
+      "description": "【公开】用户原始输入文本",
+      "visibility": "public"
+    },
+    "filters": {
+      "type": "object",
+      "description": "【公开】检索过滤条件，由协调 Agent 填充",
+      "visibility": "public",
+      "properties": {
+        "chapter_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "章节 ID 列表"
+        },
+        "question_types": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "enum": ["choice", "fill_blank", "calculation", "short_answer"] }
+        },
+        "difficulty": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 3
+        }
+      },
+      "additionalProperties": true
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "./source-ref.schema.json" },
+      "description": "【⚠️ 私有】检索返回的 SourceRef 列表。可能包含 visibility=staff_only 的私有块（答案块），学生端 API 响应中必须过滤。",
+      "visibility": "private"
+    },
+    "knowledge": {
+      "type": "array",
+      "description": "【⚠️ 私有】知识 Agent 结构化整理的知识条目，含知识点和对应 source_ref_id。用于后续出题和评分。",
+      "visibility": "private",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fact": { "type": "string" },
+          "source_ref_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" }
+          },
+          "knowledge_point_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "question_private": {
+      "description": "【🚫 严格私有】出题 Agent 生成的完整题目对象。含 expected_answer、rubric（评分点）和 source_refs。任何情况下不得进入学生可访问的 API 响应、SSE 事件或日志。",
+      "visibility": "private",
+      "$ref": "./generated-question-private.schema.json"
+    },
+    "user_answer": {
+      "type": "string",
+      "description": "【⚠️ 私有】用户提交的答案原文（Markdown/LaTeX）。仅服务端可见，前端提交后锁定不可修改。",
+      "visibility": "private"
+    },
+    "grade_private": {
+      "description": "【🚫 严格私有】评测讲解 Agent 输出的完整评分结果。含 step_scores（分步得分）、explanation、rubric_item_id 映射和 confidence。学生端仅暴露公开评分摘要。",
+      "visibility": "private",
+      "$ref": "./grade-result-private.schema.json"
+    },
+    "public_response": {
+      "type": ["string", "null"],
+      "description": "【公开】面向学生的最终输出文本（回答/拒答/训练结果摘要），由事件适配层从私有状态生成",
+      "visibility": "public"
+    },
+    "model_calls": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "description": "【公开】本次运行已使用的模型调用次数。硬上限 4，达到后进入失败节点。",
+      "visibility": "public"
+    },
+    "node_hops": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8,
+      "description": "【公开】状态图节点跳转次数。硬上限 8，防止无限循环。",
+      "visibility": "public"
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2,
+      "description": "【公开】当前步骤重试次数。最多 2 次。",
+      "visibility": "public"
+    },
+    "error": {
+      "description": "【公开】错误信息，仅失败状态时有值",
+      "visibility": "public",
+      "$ref": "./error.schema.json"
+    }
+  },
+  "additionalProperties": true,
+  "$$comment": {
+    "public_fields": "run_id, thread_id, user_id, mode, user_input, filters, public_response, model_calls, node_hops, retry_count, error（仅失败时）",
+    "private_fields": "evidence（可能含私有块）, knowledge, question_private, user_answer, grade_private",
+    "security_rule": "D 在序列化 API 响应和 SSE 事件前，必须递归检查并移除 private/private-strict 标记的字段。禁止仅依赖前端隐藏。",
+    "max_calls": "model_calls ≤ 4, node_hops ≤ 8——达到任一上限立即进入失败节点。"
+  }
+}

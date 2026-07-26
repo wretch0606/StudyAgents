@@ -1,0 +1,64 @@
+{
+  "$schema": "https://studyagents.local/contracts/mock/grading-result.schema.json",
+  "title": "Mock: 评分公开结果",
+  "description": "学生提交计算题答案后，收到的公开评分反馈。包含总分、分步反馈摘要和讲解，不含私有评分点映射和完整 rubric。",
+  "scenario": {
+    "mode": "practice",
+    "session_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+    "item_id": "d4e5f6a7-b8c9-0123-defa-bc1234567890",
+    "user_answer": "由 Δx = λD/d 可得：\nΔx = (589×10⁻⁹ × 2.0) / (0.20×10⁻³)\n    = 5.89×10⁻³ m\n    = 5.89 mm"
+  },
+  "public_grade_feedback": {
+    "run_id": "e5f6a7b8-c9d0-1234-efab-c12345678901",
+    "status": "succeeded",
+    "score": 10,
+    "max_score": 10,
+    "score_ratio": 1.0,
+    "verdict": "优秀",
+    "summary": "公式正确，单位统一，计算无误。",
+    "step_feedback": [
+      "✅ 正确列出条纹间距公式 Δx = λD/d",
+      "✅ 单位换算正确（nm→m，mm→m）并代入数值",
+      "✅ 计算结果正确（5.89 mm）"
+    ],
+    "explanation": "杨氏双缝干涉实验中，相邻明条纹间距 Δx = λD/d。本题将给定参数代入：λ = 589 nm = 5.89×10⁻⁷ m，d = 0.20 mm = 2.0×10⁻⁴ m，D = 2.0 m。Δx = (5.89×10⁻⁷ × 2.0) / (2.0×10⁻⁴) = 5.89×10⁻³ m = 5.89 mm。",
+    "citations": [
+      "[光学讲义.pdf 第14页] 条纹间距 Δx = λD/d",
+      "[光学讲义.pdf 第15页] 例题：钠光双缝干涉计算"
+    ],
+    "confidence": 0.92,
+    "review_required": false,
+    "agent_events": [
+      {
+        "id": "evt-030",
+        "run_id": "e5f6a7b8-c9d0-1234-efab-c12345678901",
+        "sequence_no": 1,
+        "agent": "evaluator",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "评测讲解 Agent 完成 3 个评分点核对，得分 10/10",
+        "duration_ms": 200,
+        "created_at": "2026-07-26T02:32:30.200Z"
+      },
+      {
+        "id": "evt-031",
+        "run_id": "e5f6a7b8-c9d0-1234-efab-c12345678901",
+        "sequence_no": 2,
+        "agent": "system",
+        "event_type": "run.completed",
+        "status": "succeeded",
+        "summary": "第 2 题评分完成，得分率 100%",
+        "duration_ms": 200,
+        "created_at": "2026-07-26T02:32:30.400Z"
+      }
+    ]
+  },
+  "$$privacy_check": {
+    "contains_full_rubric": false,
+    "contains_rubric_item_id_mapping": false,
+    "contains_raw_step_scores": false,
+    "contains_private_evidence": false,
+    "note": "公开反馈仅展示：总分、分步文字反馈、参考解法、引用、置信度。评分点 ID 和原始分值已剥离。",
+    "verdict": "✅ 安全——公开评分反馈不含完整 rubric 和私有评分映射"
+  }
+}
