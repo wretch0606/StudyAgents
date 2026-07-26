@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/contracts/grade-result-private.schema.json",
+  "title": "GradeResultPrivate",
+  "description": "评测讲解 Agent 的完整评分输出（C 内部使用）。包含分步评分和讲解。🚫 严禁将 step_scores、explanation 细节直接暴露到学生端——只通过公开摘要透出总分和关键反馈。",
+  "type": "object",
+  "required": ["score", "max_score", "step_scores", "confidence", "review_required"],
+  "properties": {
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "description": "最终得分，由服务端累加校验"
+    },
+    "max_score": {
+      "type": "number",
+      "minimum": 0,
+      "description": "满分"
+    },
+    "step_scores": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["rubric_item_id", "status", "score", "feedback"],
+        "properties": {
+          "rubric_item_id": { "type": "string" },
+          "status": {
+            "enum": ["met", "partial", "not_met"],
+            "description": "met=完全满足，partial=部分满足，not_met=未满足"
+          },
+          "score": { "type": "number", "minimum": 0 },
+          "feedback": { "type": "string" }
+        }
+      }
+    },
+    "explanation": {
+      "type": "string",
+      "description": "参考解法说明"
+    },
+    "source_ref_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "讲解中引用的证据 ID"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "评分置信度。<0.7 时标记为暂定评分并进入复核队列。"
+    },
+    "review_required": {
+      "type": "boolean",
+      "description": "true 表示需要管理员复核（confidence < 0.7 或用户申诉）"
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/contracts/generated-question-private.schema.json",
+  "title": "GeneratedQuestionPrivate",
+  "description": "出题 Agent 的完整输出（C 内部使用）。包含题目公开部分 + 私有答案和评分点。🚫 严禁将 private 子对象暴露到学生端。",
+  "type": "object",
+  "required": ["question_id", "source_kind", "question_type", "difficulty", "stem", "private", "confidence"],
+  "properties": {
+    "question_id": { "type": "string", "format": "uuid" },
+    "source_kind": { "enum": ["past_exam", "generated_variant"] },
+    "question_type": { "enum": ["choice", "fill_blank", "calculation", "short_answer"] },
+    "difficulty": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "stem": { "type": "string", "minLength": 1 },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    },
+    "knowledge_point_ids": {
+      "type": "array",
+      "items": { "type": "string", "format": "uuid" }
+    },
+    "source_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["document_name", "page_number"],
+        "properties": {
+          "document_name": { "type": "string" },
+          "page_number": { "type": "integer", "minimum": 1 },
+          "question_no": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "private": {
+      "type": "object",
+      "required": ["expected_answer", "rubric"],
+      "properties": {
+        "expected_answer": {
+          "type": "string",
+          "description": "标准答案（LaTeX 公式用 $...$ 或 $$...$$）"
+        },
+        "rubric": {
+          "type": "array",
+          "minItems": 1,
+          "description": "分步评分规则",
+          "items": {
+            "type": "object",
+            "required": ["id", "description", "max_score", "source_ref_ids"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^R[0-9]+$" },
+              "description": { "type": "string" },
+              "max_score": { "type": "number", "minimum": 0 },
+              "source_ref_ids": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "出题置信度。≥0.8 可投放给用户，<0.8 进入管理员复核队列。"
+    }
+  }
+}
