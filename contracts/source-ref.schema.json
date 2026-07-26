@@ -1,48 +1,62 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://studyagents.local/schemas/source-ref.schema.json",
+  "$id": "https://studyagents.local/contracts/source-ref.schema.json",
   "title": "SourceRef",
+  "description": "指向原始资料中某个位置的可引用证据，是 B（知识库）→ C（Agent）的核心数据结构。每个知识性结论至少关联一个 SourceRef。",
   "type": "object",
-  "additionalProperties": false,
   "required": [
     "document_id",
     "document_name",
-    "page_no",
+    "page_number",
     "chunk_id",
-    "excerpt"
+    "excerpt",
+    "score"
   ],
   "properties": {
     "document_id": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid",
+      "description": "文档 UUID，用于获取页图和管理端操作"
     },
     "document_name": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "文档展示名，如 '光学讲义.pdf'。C 在回答中引用此名称。",
+      "examples": ["光学讲义.pdf", "2024年真题汇编.pdf"]
     },
-    "page_no": {
+    "page_number": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "description": "页码（从 1 开始），回答中展示来源用"
     },
     "question_no": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"],
+      "description": "题号，如 '3'、'二.1'。非真题资料时为 null。",
+      "examples": ["3", "二.1", null]
     },
     "chunk_id": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid",
+      "description": "知识块 UUID，C 用于去重和排除已用块"
     },
     "excerpt": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 300,
+      "description": "摘录文本（≤300 字），给 Agent 做上下文依据"
     },
     "page_image_url": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"],
+      "format": "uri-reference",
+      "description": "页图地址，格式 /api/documents/{document_id}/pages/{page_number}/image。含图题时传给视觉模型。",
+      "examples": ["/api/documents/a1b2c3d4-e5f6-7890-abcd-ef1234567890/pages/12/image"]
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "description": "RRF 融合分数，C 可用于结果排序/过滤（非展示用）"
     }
-  }
+  },
+  "additionalProperties": false
 }
