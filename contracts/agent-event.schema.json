@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/contracts/agent-event.schema.json",
+  "title": "AgentEvent",
+  "description": "SSE 事件格式。C（Agent）在每个节点完成后写入事件，D（后端）通过 SSE 推送给 E（前端）展示在 Agent 协作抽屉中。公开摘要不得暴露私有答案、评分点和思维链。",
+  "type": "object",
+  "required": [
+    "id",
+    "run_id",
+    "sequence_no",
+    "agent",
+    "event_type",
+    "status",
+    "summary",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt-[a-z0-9]+$",
+      "description": "事件唯一 ID，如 'evt-001'。浏览器以 Last-Event-ID 自动续传。",
+      "examples": ["evt-001", "evt-a1b2c3d4"]
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "所属 Agent Run ID"
+    },
+    "sequence_no": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "事件序号，保证顺序"
+    },
+    "agent": {
+      "type": "string",
+      "enum": ["coordinator", "knowledge", "questioner", "evaluator", "system"],
+      "description": "事件来源 Agent。coordinator=协调，knowledge=知识，questioner=出题，evaluator=评测讲解，system=系统级事件"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "run.started",
+        "agent.started",
+        "agent.summary",
+        "agent.completed",
+        "run.waiting_user",
+        "run.completed",
+        "run.failed",
+        "heartbeat"
+      ],
+      "description": "事件类型。run.*=运行级，agent.*=节点级，heartbeat=心跳（15秒间隔）"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "waiting_user", "succeeded", "failed"],
+      "description": "当前状态"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "中文公开摘要。例如 '知识 Agent 正在检索第 3 章与真题' '找到 6 条可引用证据'。禁止暴露：模型思维链、系统提示词、私有答案、原始数据库查询。"
+    },
+    "source_refs": {
+      "type": "array",
+      "description": "本步骤用到的可引用证据，前端可点击跳转页图",
+      "items": { "$ref": "./source-ref.schema.json" }
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "本步骤耗时（毫秒）"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC 时间，前端转换本地时区"
+    }
+  },
+  "additionalProperties": false
+}
