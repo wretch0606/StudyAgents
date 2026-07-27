@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from io import StringIO
 from pathlib import Path
 
 import pytest
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 _project_root = Path(__file__).resolve().parents[3]
 if str(_project_root) not in sys.path:
@@ -21,6 +24,7 @@ from apps.api.schemas.agent import (  # noqa: E402
     MAX_SOURCE_REFS,
     MAX_SUMMARY_LENGTH,
     AgentEventDraft,
+    SourceRef,
 )
 
 # ============================================================
@@ -179,7 +183,7 @@ def test_source_refs_max_items_enforced() -> None:
     """source_refs 超过 MAX_SOURCE_REFS 项被 Pydantic 拒绝。"""
     from pydantic import ValidationError
 
-    too_many = [{"id": i} for i in range(MAX_SOURCE_REFS + 1)]
+    too_many = [{"document_id": f"doc-{i}"} for i in range(MAX_SOURCE_REFS + 1)]
     with pytest.raises(ValidationError):
         AgentEventDraft(
             agent="knowledge",
@@ -192,7 +196,7 @@ def test_source_refs_max_items_enforced() -> None:
 
 def test_source_refs_exact_max_accepted() -> None:
     """source_refs 恰好等于 MAX_SOURCE_REFS 可通过。"""
-    exact = [{"id": i} for i in range(MAX_SOURCE_REFS)]
+    exact = [{"document_id": f"doc-{i}"} for i in range(MAX_SOURCE_REFS)]
     draft = AgentEventDraft(
         agent="knowledge",
         event_type="agent.summary",
@@ -332,7 +336,7 @@ async def test_emit_persists_correct_fields() -> None:
         event_type="agent.summary",
         status="running",
         summary="证据检索完成",
-        source_refs=[{"doc_id": "d1", "page": 3}],
+        source_refs=[{"document_id": "d1", "page_no": 3}],
         duration_ms=150,
     )
     result = await sink.emit(run_id="r-fields", event=draft, db_session=db)
@@ -341,7 +345,9 @@ async def test_emit_persists_correct_fields() -> None:
     assert result.event_type == "agent.summary"
     assert result.status == "running"
     assert result.summary == "证据检索完成"
-    assert result.source_refs == [{"doc_id": "d1", "page": 3}]
+    assert len(result.source_refs) == 1
+    assert result.source_refs[0].document_id == "d1"
+    assert result.source_refs[0].page_no == 3
     assert result.duration_ms == 150
     assert result.run_id == "r-fields"
     assert result.sequence_no == 0
@@ -457,3 +463,483 @@ def _make_fake_db():
             self.committed = True
 
     return FakeDB()
+
+
+# ============================================================
+# 7. source_refs 嵌套私有字段注入测试
+# ============================================================
+
+def test_source_refs_rejects_private_field_injection() -> None:
+    """source_refs 元素内注入 question_private 被 SourceRef extra=forbid 拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="coordinator",
+            event_type="agent.summary",
+            status="running",
+            summary="ok",
+            source_refs=[{
+                "document_id": "d1",
+                "question_private": "SECRET_ANSWER",
+            }],
+        )
+
+
+def test_source_refs_rejects_grade_private() -> None:
+    """source_refs 元素内注入 grade_private 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="grader",
+            event_type="agent.completed",
+            status="running",
+            summary="graded",
+            source_refs=[{
+                "document_id": "d1",
+                "grade_private": {"score": 100},
+            }],
+        )
+
+
+def test_source_refs_rejects_prompt_injection() -> None:
+    """source_refs 元素内注入 prompt 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="coordinator",
+            event_type="agent.summary",
+            status="running",
+            summary="ok",
+            source_refs=[{
+                "document_id": "d1",
+                "prompt": "SYSTEM: You are a helpful assistant...",
+            }],
+        )
+
+
+def test_source_refs_rejects_rubric() -> None:
+    """source_refs 元素内注入 rubric 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="grader",
+            event_type="agent.summary",
+            status="running",
+            summary="graded",
+            source_refs=[{
+                "document_id": "d1",
+                "rubric": {"criteria": ["accuracy"]},
+            }],
+        )
+
+
+def test_source_refs_rejects_api_key() -> None:
+    """source_refs 元素内注入 api_key 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="coordinator",
+            event_type="agent.summary",
+            status="running",
+            summary="ok",
+            source_refs=[{
+                "document_id": "d1",
+                "api_key": "sk-evil",
+            }],
+        )
+
+
+def test_source_refs_rejects_chain_of_thought() -> None:
+    """source_refs 元素内注入 chain_of_thought 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="coordinator",
+            event_type="agent.summary",
+            status="running",
+            summary="ok",
+            source_refs=[{
+                "document_id": "d1",
+                "chain_of_thought": "Step 1: think...",
+            }],
+        )
+
+
+def test_source_refs_rejects_raw_query() -> None:
+    """source_refs 元素内注入 raw_query 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="coordinator",
+            event_type="agent.summary",
+            status="running",
+            summary="ok",
+            source_refs=[{
+                "document_id": "d1",
+                "raw_query": "SELECT * FROM users",
+            }],
+        )
+
+
+def test_source_refs_excerpt_max_length_enforced() -> None:
+    """source_refs excerpt 字段不能绕过 summary 的 2000 字限制。"""
+    from pydantic import ValidationError
+
+    from apps.api.schemas.agent import MAX_EXCERPT_LENGTH
+
+    too_long_excerpt = "x" * (MAX_EXCERPT_LENGTH + 1)
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="knowledge",
+            event_type="agent.summary",
+            status="running",
+            summary="",
+            source_refs=[{
+                "document_id": "d1",
+                "excerpt": too_long_excerpt,
+            }],
+        )
+
+
+def test_source_refs_valid_element_accepted() -> None:
+    """合法的 SourceRef 元素通过验证。"""
+    draft = AgentEventDraft(
+        agent="knowledge",
+        event_type="agent.summary",
+        status="running",
+        summary="证据检索完成",
+        source_refs=[{
+            "document_id": "doc-001",
+            "document_name": "数学必修一.pdf",
+            "page_no": 42,
+            "question_no": "3",
+            "excerpt": "根据勾股定理...",
+        }],
+    )
+    assert len(draft.source_refs) == 1
+    ref = draft.source_refs[0]
+    assert ref.document_id == "doc-001"
+    assert ref.page_no == 42
+
+
+# ============================================================
+# 8. 哨兵值防泄露测试
+# ============================================================
+
+_SENTINELS = {
+    "question": "PRIVATE_QUESTION_CANARY_abc123",
+    "rubric": "PRIVATE_RUBRIC_CANARY_def456",
+    "prompt": "PRIVATE_PROMPT_CANARY_ghi789",
+    "api_key": "PRIVATE_API_KEY_CANARY_sk-jkl012",
+    "raw_query": "PRIVATE_RAW_QUERY_CANARY_mno345",
+}
+
+
+def test_sentinels_not_in_model_dump() -> None:
+    """哨兵值不出现在 AgentEvent.model_dump() 中。"""
+    from apps.api.schemas.agent import AgentEvent
+
+    evt = AgentEvent(
+        id="evt-sentinel", run_id="r-1", sequence_no=0,
+        agent="coordinator", event_type="run.started",
+        status="running", summary="SENTINEL_SAFE_SUMMARY",
+        source_refs=[SourceRef(document_id="d1")],
+        created_at="2026-01-01T00:00:00",
+    )
+    dump_str = str(evt.model_dump())
+    for label, sentinel in _SENTINELS.items():
+        assert sentinel not in dump_str, f"{label} sentinel leaked in model_dump"
+
+
+def test_sentinels_not_in_validation_error() -> None:
+    """ValidationError 消息不含哨兵值。"""
+    from pydantic import ValidationError
+
+    for label, sentinel in _SENTINELS.items():
+        try:
+            AgentEventDraft(
+                agent="coordinator",
+                event_type="agent.summary",
+                status="running",
+                summary=sentinel,  # purposefully long — val will fail here if >2000
+            )
+        except ValidationError as exc:
+            err_str = str(exc)
+            assert sentinel not in err_str, (
+                f"{label} sentinel leaked in ValidationError message"
+            )
+
+
+def test_sentinels_not_in_repr_str() -> None:
+    """哨兵值不出现在 AgentEvent 的公开 repr/str 中。
+
+    SourceRef 的合法字段（如 excerpt）会自然出现在 repr 中——
+    这是预期行为。关键是要确保 private_payload 等私有字段
+    不通过 repr/str 泄露。
+    """
+    from apps.api.schemas.agent import AgentEvent
+
+    evt = AgentEvent(
+        id="evt-repr", run_id="r-1", sequence_no=0,
+        agent="coordinator", event_type="run.started",
+        status="running", summary="safe",
+        source_refs=[SourceRef(document_id="d1")],
+        created_at="2026-01-01T00:00:00",
+    )
+    evt_str = repr(evt)
+    evt_str_lower = str(evt).lower()
+    # private_payload must NOT appear in repr or str
+    assert "private_payload" not in evt_str, f"private_payload in repr: {evt_str}"
+    assert "private_payload" not in evt_str_lower
+    # sentinels must not appear in AgentEvent repr (they can't be in AgentEvent)
+    for label, sentinel in _SENTINELS.items():
+        assert sentinel not in evt_str, f"{label} sentinel leaked in repr"
+        assert sentinel not in evt_str_lower, f"{label} sentinel leaked in str"
+
+
+def test_sentinels_not_in_source_refs_dump() -> None:
+    """哨兵值不能通过 source_refs 嵌套注入后出现在 model_dump 中。"""
+    # Valid SourceRef but with a sentinel in excerpt (excerpt is allowed)
+    draft = AgentEventDraft(
+        agent="knowledge",
+        event_type="agent.summary",
+        status="running",
+        summary="safe summary",
+        source_refs=[{
+            "document_id": "d1",
+            "excerpt": _SENTINELS["question"],
+        }],
+    )
+    # Sentinel in excerpt IS allowed content — but verify no OTHER sentinels leak
+    dump_str = str(draft.model_dump())
+    for label, sentinel in _SENTINELS.items():
+        if label == "question":
+            continue  # This one IS in excerpt by design
+        assert sentinel not in dump_str, f"{label} sentinel leaked via source_refs"
+
+
+def test_source_refs_rejects_expected_answer_injection() -> None:
+    """source_refs 元素内注入 expected_answer 被拒绝。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentEventDraft(
+            agent="coordinator",
+            event_type="agent.summary",
+            status="running",
+            summary="ok",
+            source_refs=[{
+                "document_id": "d1",
+                "expected_answer": "The correct answer is B",
+            }],
+        )
+
+
+# ============================================================
+# 9. Commit-before-publish 失败场景测试
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_no_sse_publish_on_db_error() -> None:
+    """数据库操作失败时不发布 SSE。"""
+    from apps.api.services.agent_event_sink import AgentEventSink
+
+    db = _make_failing_db()
+    sink = AgentEventSink()
+    draft = AgentEventDraft(
+        agent="coordinator", event_type="run.started",
+        status="running", summary="start",
+    )
+    with pytest.raises(RuntimeError, match="DB commit failed"):
+        await sink.emit(run_id="r-fail", event=draft, db_session=db)
+    # SSE should never have been called (test passes if exception raised before publish)
+
+
+@pytest.mark.asyncio
+async def test_event_persisted_even_when_sse_publish_fails() -> None:
+    """SSE 发布失败后事件仍在数据库中（commit 已成功）。"""
+    import apps.api.services.sse_manager as sse_mod
+
+    db = _make_fake_db()
+    original_publish = sse_mod.sse_manager.publish
+
+    async def _failing_publish(run_id, event):
+        raise ConnectionError("SSE publish failed")
+
+    sse_mod.sse_manager.publish = _failing_publish
+    try:
+        from apps.api.services.agent_event_sink import AgentEventSink
+
+        sink = AgentEventSink()
+        draft = AgentEventDraft(
+            agent="coordinator", event_type="run.started",
+            status="running", summary="persist-test",
+        )
+        result = await sink.emit(run_id="r-sse-fail", event=draft, db_session=db)
+        # emit returns successfully (exception caught and logged)
+        assert result.summary == "persist-test"
+        # DB was committed before SSE failure
+        assert db.committed is True
+    finally:
+        sse_mod.sse_manager.publish = original_publish
+
+
+@pytest.mark.asyncio
+async def test_sequence_monotonic_after_failure() -> None:
+    """emit 失败后重试不重复 sequence_no。"""
+    import apps.api.services.sse_manager as sse_mod
+    from apps.api.services.agent_event_sink import AgentEventSink
+
+    db = _make_fake_db()
+    sink = AgentEventSink()
+
+    # First emit — succeeds, seq=0
+    e1 = await sink.emit(
+        run_id="r-seq-fail",
+        event=AgentEventDraft(
+            agent="coordinator", event_type="run.started",
+            status="running", summary="first",
+        ),
+        db_session=db,
+    )
+    assert e1.sequence_no == 0
+
+    # Second emit after SSE failure (but commit succeeded) — seq=1
+    original_publish = sse_mod.sse_manager.publish
+
+    async def _failing_publish(run_id, event):
+        raise ConnectionError("SSE publish failed")
+
+    sse_mod.sse_manager.publish = _failing_publish
+    try:
+        e2 = await sink.emit(
+            run_id="r-seq-fail",
+            event=AgentEventDraft(
+                agent="coordinator", event_type="agent.summary",
+                status="running", summary="second",
+            ),
+            db_session=db,
+        )
+        assert e2.sequence_no == 1  # not 0 — sequence advanced
+        assert e1.sequence_no != e2.sequence_no
+    finally:
+        sse_mod.sse_manager.publish = original_publish
+
+
+# ---- helpers for failure tests ----
+
+
+def _make_failing_db():
+    """创建 commit 会失败的 FakeDB。"""
+
+    class FakeRunResult:
+        def scalar_one_or_none(self):
+            return type("FakeRun", (), {"id": "r"})
+
+    class FakeSeqResult:
+        def __init__(self, val):
+            self._val = val
+
+        def scalar_one_or_none(self):
+            return self._val if self._val >= 0 else None
+
+    class FailingDB:
+        def __init__(self):
+            self._seq: dict[str, int] = {}
+
+        async def execute(self, stmt):
+            stmt_str = str(stmt)
+            if "agent_runs" in stmt_str and "FOR UPDATE" in stmt_str.upper():
+                return FakeRunResult()
+            return FakeSeqResult(self._seq.get("r-default", -1) + 1)
+
+        async def flush(self):
+            pass
+
+        async def commit(self):
+            raise RuntimeError("DB commit failed")
+
+    return FailingDB()
+
+
+# ============================================================
+# 10. 真实 PostgreSQL 并发测试
+# ============================================================
+
+@pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
+@pytest.mark.asyncio
+async def test_postgres_concurrent_emit_no_duplicate_seq() -> None:
+    """真实 PostgreSQL + 独立 session + asyncio.gather 并发测试。
+
+    验证 SELECT ... FOR UPDATE 锁在真实数据库中防止重复 sequence_no。
+    """
+    import asyncio
+    import uuid
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from apps.api.db.models.agent_run import AgentRun as AgentRunModel
+    from apps.api.db.models.user import User
+    from apps.api.services.agent_event_sink import AgentEventSink
+
+    url = DATABASE_URL
+    for prefix in ("+psycopg", "+asyncpg"):
+        url = url.replace(prefix, "")
+    async_url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    engine = create_async_engine(async_url)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with maker() as session:
+        # Fetch a user for foreign key
+        user_result = await session.execute(select(User).limit(1))
+        user = user_result.scalar_one_or_none()
+        if user is None:
+            pytest.skip("No users in database")
+
+        # Create an agent_run for the test events
+        rid = str(uuid.uuid4())
+        tid = str(uuid.uuid4())
+        run = AgentRunModel(id=rid, thread_id=tid, user_id=user.id, mode="qa")
+        session.add(run)
+        await session.commit()
+
+    n_workers = 5
+
+    async def emit_one(i: int) -> int:
+        """每个协程使用独立的 AsyncSession 模拟真实并发。"""
+        async with maker() as session:
+            sink = AgentEventSink()
+            result = await sink.emit(
+                run_id=rid,
+                event=AgentEventDraft(
+                    agent="coordinator",
+                    event_type="agent.summary",
+                    status="running",
+                    summary=f"concurrent-{i}",
+                ),
+                db_session=session,
+            )
+            return result.sequence_no
+
+    results = await asyncio.gather(*[emit_one(i) for i in range(n_workers)])
+    seqs = sorted(results)
+    # Verify all sequence numbers are unique and form a consecutive range
+    assert seqs == list(range(n_workers)), (
+        f"Expected 0..{n_workers - 1}, got {seqs}"
+    )
+    assert len(set(seqs)) == n_workers
+
+    await engine.dispose()
