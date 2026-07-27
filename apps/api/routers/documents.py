@@ -177,7 +177,7 @@ async def list_documents(
     from apps.api.repositories.auth import find_user_by_id
     user = await find_user_by_id(session, user_id)
     if user is None or user.role != "admin":
-        raise ApiError("AUTH_FORBIDDEN", "仅管理员可查看资料列表。", status_code=403, retryable=False)
+        raise ApiError("AUTH_FORBIDDEN", "仅管理员可查看。", status_code=403, retryable=False)
 
     from sqlalchemy import func, select
 
@@ -216,7 +216,7 @@ async def get_document(
     from apps.api.repositories.auth import find_user_by_id
     user = await find_user_by_id(session, user_id)
     if user is None or user.role != "admin":
-        raise ApiError("AUTH_FORBIDDEN", "仅管理员可查看资料详情。", status_code=403, retryable=False)
+        raise ApiError("AUTH_FORBIDDEN", "仅管理员可查看。", status_code=403, retryable=False)
 
     doc = await _get_doc_or_404(session, doc_id)
 
