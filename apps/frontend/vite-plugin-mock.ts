@@ -33,17 +33,29 @@ const MOCK_ROOT = resolve(__dirname, '../../contracts/mock')
 // Mock 路由表
 // ============================================================
 
+/** 模拟网络延迟（ms） */
+const MOCK_DELAY_MS = 1000
+
 /** 需要拦截的路由：method → path → JSON 文件 */
 const MOCK_ROUTES: Record<string, Record<string, string>> = {
   POST: {
     '/api/auth/login': 'auth/login.json',
     '/api/auth/logout': 'auth/logout.json',
+    '/api/admin/knowledge/upload': 'admin/knowledge-upload.json',
+    '/api/chat/upload': 'chat/upload.json',
   },
   GET: {
     '/api/auth/csrf-token': 'auth/csrf-token.json',
     '/api/auth/me': 'auth/me.json',
+    '/api/chat/history': 'chat/history.json',
   },
 }
+
+/** 文件上传类路由（multipart/form-data，不解析 JSON body） */
+const UPLOAD_ROUTES: ReadonlySet<string> = new Set([
+  '/api/admin/knowledge/upload',
+  '/api/chat/upload',
+])
 
 // ============================================================
 // 工具函数
@@ -165,9 +177,17 @@ async function handleMockRequest(
   mockCache: Record<string, object>,
 ): Promise<void> {
   const method = (req.method ?? 'GET').toUpperCase()
+  const pathname = (req.url ?? '/').split('?')[0]
+  const isUpload = UPLOAD_ROUTES.has(pathname)
 
   try {
     if (method === 'POST') {
+      // ----- 文件上传路由：跳过 JSON 解析，直接返回 Mock 数据 + 模拟延迟 -----
+      if (isUpload) {
+        await sleep(MOCK_DELAY_MS)
+        return sendJson(res, mockData)
+      }
+
       // ----- POST: 解析 body 并可做简单校验 -----
       const body = await parseBody(req)
 
@@ -224,4 +244,9 @@ async function handleMockRequest(
       500,
     )
   }
+}
+
+/** Promise 形式的延迟 */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }

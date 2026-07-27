@@ -11,13 +11,16 @@ import { ref, nextTick, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../stores/useChatStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
+import { uploadChatAttachment } from '../api/upload'
+import AgentDrawer from '../components/AgentDrawer.vue'
 
 // =========================================================
 // 聊天状态（Pinia Store）
 // =========================================================
 
 const chatStore = useChatStore()
-const { messages, agentSteps, sourceRefs, isStreaming } = storeToRefs(chatStore)
+// 仅提取 Home.vue 模板直接使用的状态（AgentDrawer 自行从 Store 读取）
+const { messages, isStreaming, attachments } = storeToRefs(chatStore)
 
 // ---- 页面挂载时发起网络请求获取对话历史 ----
 onMounted(() => {
@@ -87,16 +90,18 @@ async function handleSend() {
   const text = inputText.value.trim()
   if (!text || isStreaming.value) return
 
-  // 1. 将用户输入作为新消息加入 Store
+  // 1. 将用户输入作为新消息加入 Store（含附件）
   chatStore.addMessage({
     id: `m${Date.now()}`,
     role: 'user',
     content: text,
     timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+    attachments: attachments.value.length > 0 ? [...attachments.value] : undefined,
   })
 
-  // 2. 清空输入框
+  // 2. 清空输入框 + 已发送的附件
   inputText.value = ''
+  chatStore.clearAttachments()
 
   // 3. 触发纯前端模拟的 SSE 流式打字机回复
   //    （真实对接后替换为 EventSource / fetch 流读取）
@@ -114,6 +119,65 @@ function scrollToBottom() {
 }
 
 // =========================================================
+// 问答附件上传（📎 回形针按钮）
+// =========================================================
+const chatFileInputRef = ref<HTMLInputElement | null>(null)
+const chatUploading = ref(false)
+
+/** 格式化文件大小为可读字符串 */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** 点击回形针 → 触发隐藏的 file input */
+function triggerChatUpload() {
+  chatFileInputRef.value?.click()
+}
+
+/** 文件选择后 → 上传 → 暂存到 Store */
+async function handleChatFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  const localId = `att-${Date.now()}`
+
+  // 先添加到 Store（uploading 状态，显示加载卡片）
+  chatStore.addAttachment({
+    localId,
+    fileUrl: '',
+    fileName: file.name,
+    fileSize: file.size,
+    uploadStatus: 'uploading',
+  })
+
+  chatUploading.value = true
+  try {
+    const res = await uploadChatAttachment(file)
+    // 上传成功 → 更新状态
+    chatStore.updateAttachment(localId, {
+      fileUrl: res.file_url,
+      fileName: res.file_name,
+      uploadStatus: 'done',
+    })
+  } catch {
+    // 上传失败
+    chatStore.updateAttachment(localId, { uploadStatus: 'failed' })
+  } finally {
+    chatUploading.value = false
+    // 重置 input 以便重复选择同一文件
+    input.value = ''
+  }
+}
+
+/** 从待发送列表中移除附件 */
+function removeChatAttachment(localId: string) {
+  chatStore.removeAttachment(localId)
+}
+
+// =========================================================
 // PDF 导入
 // =========================================================
 const pdfUploading = ref(false)
@@ -126,10 +190,9 @@ function handlePdfImport() {
 }
 
 // =========================================================
-// 右侧 Agent 抽屉
+// 右侧 Agent 抽屉（PC：侧边栏 / 移动端：ElDrawer 浮层）
 // =========================================================
 const drawerOpen = ref(true)
-const drawerTab = ref<'agents' | 'sources'>('agents')
 
 function toggleDrawer() {
   drawerOpen.value = !drawerOpen.value
@@ -308,12 +371,17 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
             </el-select>
           </template>
 
-          <!-- Agent 抽屉切换 -->
+          <!-- Agent 抽屉切换（PC） -->
           <button class="btn-drawer-toggle" @click="toggleDrawer" :title="drawerOpen ? '收起 Agent 面板' : '展开 Agent 面板'">
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
               <path v-if="drawerOpen" fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
               <path v-else fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
             </svg>
+          </button>
+
+          <!-- Agent 抽屉切换（移动端） -->
+          <button class="btn-drawer-toggle-mobile" @click="toggleDrawer" title="查看 Agent 流程">
+            <span class="mobile-toggle-icon">💡</span>
           </button>
         </div>
       </header>
@@ -418,6 +486,15 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                 <div class="msg-body">
                   <div :class="['bubble', msg.role, { refusal: msg.isRefusal }]">
                     <p v-for="(line, li) in msg.content.split('\n')" :key="li" class="bubble-line" v-html="renderMarkdownLine(line)" />
+                    <!-- 附件标签（仅 user 消息） -->
+                    <div v-if="msg.role === 'user' && msg.attachments && msg.attachments.length > 0" class="msg-attachments">
+                      <span v-for="att in msg.attachments" :key="att.localId" class="msg-att-tag">
+                        <svg viewBox="0 0 20 20" fill="currentColor">
+                          <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" />
+                        </svg>
+                        {{ att.fileName }}
+                      </span>
+                    </div>
                   </div>
 
                   <!-- 引用标签 -->
@@ -461,6 +538,50 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
 
       <!-- 底部输入区（仅对话模式显示） -->
       <footer v-if="navMode === 'chat'" class="chat-input-area">
+        <!-- 隐藏文件上传 input（问答附件） -->
+        <input
+          ref="chatFileInputRef"
+          type="file"
+          class="chat-file-hidden"
+          accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt,.md"
+          @change="handleChatFileChange"
+        />
+
+        <!-- 附件卡片区（上传中 / 已上传） -->
+        <div v-if="attachments.length > 0" class="attachment-cards">
+          <div
+            v-for="att in attachments"
+            :key="att.localId"
+            :class="['attachment-mini-card', att.uploadStatus]"
+          >
+            <!-- 上传中：旋转 spinner -->
+            <span v-if="att.uploadStatus === 'uploading'" class="att-spinner"></span>
+            <!-- 已上传：文件图标 -->
+            <svg v-else-if="att.uploadStatus === 'done'" class="att-file-icon" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" />
+            </svg>
+            <!-- 失败：警告图标 -->
+            <svg v-else class="att-file-icon att-error" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+            </svg>
+
+            <span class="att-filename">{{ att.fileName }}</span>
+            <span v-if="att.uploadStatus === 'uploading'" class="att-size">{{ formatFileSize(att.fileSize) }}</span>
+
+            <!-- 删除按钮 -->
+            <button
+              class="att-remove"
+              :disabled="att.uploadStatus === 'uploading'"
+              @click="removeChatAttachment(att.localId)"
+              title="移除附件"
+            >
+              <svg viewBox="0 0 20 20" fill="currentColor" class="att-remove-icon">
+                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
         <div class="quick-prompts">
           <button v-for="qp in quickPrompts" :key="qp" class="chip" @click="inputText = qp">
             {{ qp }}
@@ -473,6 +594,13 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
             </svg>
             <span class="btn-import-label">PDF</span>
+          </button>
+
+          <!-- 📎 附件上传按钮 -->
+          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming || chatUploading" title="上传附件">
+            <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
+            </svg>
           </button>
 
           <el-input
@@ -497,120 +625,9 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
     </main>
 
     <!-- ======================================== -->
-    <!-- 右侧：Agent 协作抽屉                       -->
+    <!-- 右侧：Agent 协作抽屉（自行从 Store 读取状态）  -->
     <!-- ======================================== -->
-    <aside :class="['sidebar-right', { collapsed: !drawerOpen }]">
-      <div class="drawer-inner">
-        <header class="drawer-header">
-          <h3 class="drawer-title">Agent 协作面板</h3>
-          <div class="drawer-tabs">
-            <button :class="['drawer-tab', { active: drawerTab === 'agents' }]" @click="drawerTab = 'agents'">
-              Agent 流程
-            </button>
-            <button :class="['drawer-tab', { active: drawerTab === 'sources' }]" @click="drawerTab = 'sources'">
-              溯源引用
-            </button>
-          </div>
-        </header>
-
-        <el-scrollbar class="drawer-scroll">
-          <!-- ====================================== -->
-          <!-- Agent 流程视图                           -->
-          <!-- ====================================== -->
-          <template v-if="drawerTab === 'agents'">
-            <div class="drawer-section">
-              <p class="section-desc">
-                以下展示四类 Agent 在当前问答中的协同工作状态。所有 Agent 思考步骤通过 SSE 事件实时推送给前端。
-              </p>
-
-              <!-- Agent 步骤卡片 -->
-              <div v-for="(step, idx) in agentSteps" :key="step.agentRole" class="agent-step-card">
-                <!-- 连接线 -->
-                <div v-if="idx > 0" class="step-connector">
-                  <svg viewBox="0 0 2 20" class="connector-line">
-                    <line x1="1" y1="0" x2="1" y2="20" stroke="var(--border)" stroke-width="2" stroke-dasharray="2 3" />
-                  </svg>
-                </div>
-
-                <div :class="['step-card-inner', step.status]">
-                  <!-- 状态指示与角色 -->
-                  <div class="step-head">
-                    <span :class="['step-dot', step.status]"></span>
-                    <span class="step-role">{{ step.agentLabel }}</span>
-                    <span :class="['step-badge', step.status]">
-                      {{ step.status === 'succeeded' ? '已完成' : step.status === 'running' ? '运行中' : step.status === 'failed' ? '失败' : '待命' }}
-                    </span>
-                    <span v-if="step.durationMs" class="step-duration">{{ step.durationMs }}ms</span>
-                  </div>
-
-                  <!-- 摘要 -->
-                  <p class="step-summary">{{ step.summary }}</p>
-
-                  <!-- 详情（展开） -->
-                  <details v-if="step.detail" class="step-detail">
-                    <summary>查看详细步骤</summary>
-                    <p class="step-detail-text">{{ step.detail }}</p>
-                  </details>
-                </div>
-              </div>
-
-              <!-- 工作流说明 -->
-              <div class="workflow-legend">
-                <p class="legend-title">Agent 协同流程</p>
-                <div class="legend-flow">
-                  <span class="flow-node">用户提问</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node accent">Coordinator</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node accent">Knowledge</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node">回答 / 拒答</span>
-                </div>
-                <div class="legend-flow practice-flow">
-                  <span class="flow-node">开始训练</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node accent">Questioner</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node">提交答案</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node accent">Evaluator</span>
-                  <span class="flow-arrow">→</span>
-                  <span class="flow-node">评分讲解</span>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <!-- ====================================== -->
-          <!-- 溯源引用视图                             -->
-          <!-- ====================================== -->
-          <template v-else>
-            <div class="drawer-section">
-              <p class="section-desc">
-                所有回答均引用自已导入的课程资料。每条引用精确到文档名、页码和证据片段，确保可复核、可溯源。
-              </p>
-
-              <div v-for="ref in sourceRefs" :key="ref.refId" class="source-card">
-                <div class="source-head">
-                  <span class="source-ref-badge">[{{ ref.refId }}]</span>
-                  <span class="source-doc">{{ ref.documentName }}</span>
-                  <span class="source-page">第 {{ ref.pageNumber }} 页</span>
-                </div>
-                <blockquote class="source-excerpt">
-                  "{{ ref.excerpt }}"
-                </blockquote>
-                <div class="source-footer">
-                  <svg class="icon-svg source-link-icon" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5.172 6.828a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clip-rule="evenodd" />
-                  </svg>
-                  <span class="source-chunk-id">chunk: {{ ref.refId === 'S1' ? 'a1b2c3' : ref.refId === 'S2' ? 'd4e5f6' : 'g7h8i9' }}</span>
-                </div>
-              </div>
-            </div>
-          </template>
-        </el-scrollbar>
-      </div>
-    </aside>
+    <AgentDrawer v-model="drawerOpen" />
   </div>
 </template>
 
@@ -1033,6 +1050,31 @@ export function renderMarkdownLine(line: string): string {
   background: var(--accent-bg);
   color: var(--accent);
   border-color: var(--accent-border);
+}
+
+/* 移动端 Agent 抽屉切换按钮（PC 端隐藏） */
+.btn-drawer-toggle-mobile {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+
+.btn-drawer-toggle-mobile:hover {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+.mobile-toggle-icon {
+  font-size: 18px;
+  line-height: 1;
 }
 
 /* --- 错题本视图 --- */
@@ -1483,6 +1525,186 @@ export function renderMarkdownLine(line: string): string {
   text-align: left;
 }
 
+/* --- 附件上传按钮（📎 回形针） --- */
+.btn-attach {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 44px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+
+.btn-attach:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.btn-attach:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 隐藏文件 input */
+.chat-file-hidden {
+  display: none;
+}
+
+/* --- 附件迷你卡片区 --- */
+.attachment-cards {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+
+.attachment-mini-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: var(--text-h);
+  max-width: 260px;
+  transition: border-color 0.2s;
+}
+
+.attachment-mini-card.uploading {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.attachment-mini-card.done {
+  border-color: rgba(52, 211, 153, 0.3);
+  background: rgba(52, 211, 153, 0.06);
+}
+
+.attachment-mini-card.failed {
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(248, 113, 113, 0.06);
+}
+
+/* 上传旋转器 */
+.att-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--accent-border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: att-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes att-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 文件图标 */
+.att-file-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.7;
+}
+
+.att-file-icon.att-error {
+  color: #f87171;
+}
+
+/* 文件名 */
+.att-filename {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+/* 文件大小 */
+.att-size {
+  font-size: 10px;
+  color: var(--text);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+/* 删除按钮 */
+.att-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: all 0.15s;
+}
+
+.att-remove:hover:not(:disabled) {
+  opacity: 1;
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.att-remove:disabled {
+  cursor: not-allowed;
+}
+
+.att-remove-icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* --- 用户消息气泡内的附件展示 --- */
+.bubble.user .msg-attachments {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.bubble.user .msg-att-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.9);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bubble.user .msg-att-tag svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
 /* ============================================================
    右侧 Agent 抽屉
    ============================================================ */
@@ -1860,9 +2082,13 @@ export function renderMarkdownLine(line: string): string {
     display: none;
   }
 
-  /* ---- 右侧 Agent 抽屉：隐藏（覆盖 collapsed 态的 width:0）---- */
-  .sidebar-right {
-    display: none !important;
+  /* ---- 右侧 Agent 抽屉：移动端由 AgentDrawer 组件接管（ElDrawer 浮层）---- */
+  .btn-drawer-toggle {
+    display: none;
+  }
+
+  .btn-drawer-toggle-mobile {
+    display: flex;
   }
 
   /* ---- 中间主问答区：占满全宽 ---- */

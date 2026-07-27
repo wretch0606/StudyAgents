@@ -26,6 +26,22 @@ export interface ChatMessage {
   citationIds?: string[]
   /** 是否为拒答消息 */
   isRefusal?: boolean
+  /** 关联的附件信息（仅 user 消息，随提问一起发送） */
+  attachments?: ChatAttachment[]
+}
+
+/** 问答附件（聊天输入框上传，暂存后随用户提问发送） */
+export interface ChatAttachment {
+  /** 附件临时 ID（本地生成，用于删除操作） */
+  localId: string
+  /** 服务端返回的文件 URL */
+  fileUrl: string
+  /** 原始文件名 */
+  fileName: string
+  /** 文件大小（字节） */
+  fileSize: number
+  /** 上传状态 */
+  uploadStatus: 'uploading' | 'done' | 'failed'
 }
 
 /** Agent 工作流步骤 */
@@ -34,6 +50,20 @@ export interface AgentStep {
   agentLabel: string
   status: 'idle' | 'running' | 'succeeded' | 'failed'
   summary: string
+  detail?: string
+  durationMs?: number
+}
+
+/** Agent 实时执行轨迹（当前消息的 Agent 接力过程） */
+export interface AgentTrace {
+  agentRole: 'coordinator' | 'knowledge' | 'questioner' | 'evaluator'
+  agentLabel: string
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  /** 用于 AgentDrawer 卡片展示的摘要文案，随 Agent 状态动态更新 */
+  summary: string
+  /** 原始动作描述（保留用于调试 / 详情） */
+  action: string
+  /** 可选详情（与 AgentStep.detail 对齐，历史回放时可展开） */
   detail?: string
   durationMs?: number
 }
@@ -82,6 +112,12 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 当前正在流式追加的助手消息 ID */
   const streamingMessageId = ref<string | null>(null)
+
+  /** 待发送的附件列表（上传完成后暂存，随下次用户提问一起发送） */
+  const attachments = ref<ChatAttachment[]>([])
+
+  /** 当前消息的 Agent 实时执行轨迹（流式回复期间逐阶段更新） */
+  const currentAgentTraces = ref<AgentTrace[]>([])
 
   // ==========================================================
   // Getters
@@ -200,11 +236,13 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 模拟 SSE 流式打字机效果（纯前端演示）。
+   * 模拟 SSE 流式打字机效果 + 多 Agent 协同轨迹（纯前端演示）。
    *
-   * 在 messages 末尾追加一条空的 assistant 消息，
-   * 然后通过 setInterval 逐字追加测试文本，
-   * 直到全部输出完毕。
+   * 1. 在 messages 末尾追加一条空的 assistant 消息，
+   *    然后通过 setInterval 逐字追加测试文本，直到全部输出完毕。
+   * 2. 同时通过 setTimeout 模拟四类 Agent 的接力过程：
+   *    Coordinator（意图解析）→ Knowledge（资料检索）→ Evaluator（证据验证）
+   *    各阶段状态更新写入 currentAgentTraces，驱动 AgentDrawer 时间轴渲染。
    *
    * 真实 SSE 接入后，替换为 EventSource / fetch 流读取。
    *
@@ -212,6 +250,100 @@ export const useChatStore = defineStore('chat', () => {
    */
   function simulateStreamingResponse(): Promise<void> {
     return new Promise((resolve) => {
+      // ========================================================
+      // 阶段 0：清理上轮轨迹 + 初始化 Agent 执行轨迹
+      // ========================================================
+
+      // 清除上一轮残留的 Agent 轨迹，避免新旧数据混杂
+      clearAgentTraces()
+
+      const traces: AgentTrace[] = [
+        {
+          agentRole: 'coordinator',
+          agentLabel: '🧠 Coordinator',
+          status: 'running',
+          summary: '正在解析用户意图，拆解为可检索的知识点…',
+          action: '解析用户意图，拆解为可检索的知识点…',
+          durationMs: 0,
+        },
+        {
+          agentRole: 'knowledge',
+          agentLabel: '📚 Knowledge',
+          status: 'idle',
+          summary: '等待检索请求',
+          action: '等待检索请求',
+          durationMs: 0,
+        },
+        {
+          agentRole: 'questioner',
+          agentLabel: '❓ Questioner',
+          status: 'idle',
+          summary: '当前为自由问答模式，出题 Agent 处于待命状态',
+          action: '当前为自由问答模式，出题 Agent 处于待命状态',
+          durationMs: 0,
+        },
+        {
+          agentRole: 'evaluator',
+          agentLabel: '⚖️ Evaluator',
+          status: 'idle',
+          summary: '等待验证任务',
+          action: '等待验证任务',
+          durationMs: 0,
+        },
+      ]
+      currentAgentTraces.value = [...traces]
+
+      // 提前标记 isStreaming = true，确保 AgentDrawer 的 hasLiveTraces
+      // 在轨迹初始化后立即为 true，不再等待首个 appendStreamChunk（50ms 延迟）
+      isStreaming.value = true
+
+      // ========================================================
+      // 阶段 1：t ≈ 600ms — Coordinator 完成 → Knowledge 启动
+      // ========================================================
+      setTimeout(() => {
+        traces[0].status = 'succeeded'
+        traces[0].summary = '意图解析完成：识别为计算机网络课程问题，拆解出 TCP 拥塞控制、滑动窗口、慢启动 3 个子主题'
+        traces[0].action = '意图解析完成：识别为计算机网络课程问题，拆解出 TCP 拥塞控制、滑动窗口、慢启动 3 个子主题'
+        traces[0].durationMs = 600
+        traces[1].status = 'running'
+        traces[1].summary = '正在课程资料库中检索相关文档片段…'
+        traces[1].action = '在课程资料库中检索相关文档片段…'
+        currentAgentTraces.value = [...traces]
+      }, 600)
+
+      // ========================================================
+      // 阶段 2：t ≈ 1600ms — Knowledge 完成 → Evaluator 启动
+      // ========================================================
+      setTimeout(() => {
+        traces[1].status = 'succeeded'
+        traces[1].summary = '检索完成：命中 3 个相关文档片段（TCP 拥塞控制 §3.2、滑动窗口 §3.3、慢启动算法 §3.1）'
+        traces[1].action = '检索完成：命中 3 个相关文档片段（TCP 拥塞控制 §3.2、滑动窗口 §3.3、慢启动算法 §3.1）'
+        traces[1].durationMs = 1000
+        // Questioner 始终 idle（自由问答模式不激活）
+        traces[2].status = 'idle'
+        traces[2].summary = '当前为自由问答模式，出题 Agent 处于待命状态'
+        traces[2].action = '当前为自由问答模式，出题 Agent 处于待命状态'
+        traces[2].durationMs = 0
+        traces[3].status = 'running'
+        traces[3].summary = '正在验证检索结果的相关性与证据充分性…'
+        traces[3].action = '验证检索结果的相关性与证据充分性…'
+        currentAgentTraces.value = [...traces]
+      }, 1600)
+
+      // ========================================================
+      // 阶段 3：t ≈ 2400ms — Evaluator 完成，全部 Agent 就绪
+      // ========================================================
+      setTimeout(() => {
+        traces[3].status = 'succeeded'
+        traces[3].summary = '验证通过：3 个片段均与用户问题高度相关，证据充分可作答'
+        traces[3].action = '验证通过：3 个片段均与用户问题高度相关，证据充分可作答'
+        traces[3].durationMs = 800
+        currentAgentTraces.value = [...traces]
+      }, 2400)
+
+      // ========================================================
+      // 文本流式输出（与 Agent 轨迹并行，立即开始）
+      // ========================================================
       const testText =
         '您好！这是由纯前端模拟的 SSE 流式打字机效果。' +
         '在未来的真实对接中，这里将替换为浏览器原生的 EventSource 或 Fetch API 接收流数据。' +
@@ -236,6 +368,56 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  /**
+   * 添加附件到待发送列表（上传中状态）。
+   *
+   * @param att 附件信息
+   */
+  function addAttachment(att: ChatAttachment): void {
+    attachments.value.push(att)
+  }
+
+  /**
+   * 更新附件状态（上传完成后 → done / failed）。
+   *
+   * @param localId 附件本地 ID
+   * @param updates 要更新的字段
+   */
+  function updateAttachment(
+    localId: string,
+    updates: Partial<ChatAttachment>,
+  ): void {
+    const idx = attachments.value.findIndex((a) => a.localId === localId)
+    if (idx !== -1) {
+      attachments.value[idx] = { ...attachments.value[idx], ...updates }
+    }
+  }
+
+  /**
+   * 从待发送列表中移除指定附件。
+   *
+   * @param localId 附件本地 ID
+   */
+  function removeAttachment(localId: string): void {
+    attachments.value = attachments.value.filter((a) => a.localId !== localId)
+  }
+
+  /**
+   * 清空所有待发送附件。
+   */
+  function clearAttachments(): void {
+    attachments.value = []
+  }
+
+  /**
+   * 清空当前 Agent 实时执行轨迹。
+   *
+   * 在开始新一轮流式回复前调用，避免残留上一轮的轨迹数据。
+   */
+  function clearAgentTraces(): void {
+    currentAgentTraces.value = []
+  }
+
   // ==========================================================
   // 导出
   // ==========================================================
@@ -249,6 +431,8 @@ export const useChatStore = defineStore('chat', () => {
     loading,
     isStreaming,
     streamingMessageId,
+    attachments,
+    currentAgentTraces,
     // getters
     lastMessage,
     getRefById,
@@ -259,5 +443,10 @@ export const useChatStore = defineStore('chat', () => {
     appendStreamChunk,
     finishStream,
     simulateStreamingResponse,
+    addAttachment,
+    updateAttachment,
+    removeAttachment,
+    clearAttachments,
+    clearAgentTraces,
   }
 })
