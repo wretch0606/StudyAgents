@@ -386,12 +386,22 @@ async def test_all_eight_event_types_emit() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _patch_repo():
-    """用内存实现替换 agent_run repository（避免真实 DB 依赖）。"""
+def _patch_repo(request):
+    """用内存实现替换 agent_run repository（避免真实 DB 依赖）。
+
+    标记 @pytest.mark.real_db 的测试跳过此补丁，使用真实数据库。
+    保存并恢复原始函数，防止补丁在测试间泄漏。
+    """
+    if request.node.get_closest_marker("real_db"):
+        yield
+        return
     import apps.api.repositories.agent_run as repo
 
     _events: dict[str, list] = {}
     _seqs: dict[str, int] = {}
+
+    _orig_get_next = repo.get_next_sequence
+    _orig_insert = repo.insert_event
 
     async def _get_next_seq(session, run_id):
         seq = _seqs.get(run_id, -1) + 1
@@ -424,6 +434,8 @@ def _patch_repo():
     repo.get_next_sequence = _get_next_seq
     repo.insert_event = _insert_event
     yield
+    repo.get_next_sequence = _orig_get_next
+    repo.insert_event = _orig_insert
 
 
 # ---- 支持 FOR UPDATE 的 FakeDB ----
@@ -873,6 +885,7 @@ def _make_failing_db():
 # 10. 真实 PostgreSQL 并发测试
 # ============================================================
 
+@pytest.mark.real_db
 @pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 @pytest.mark.asyncio
 async def test_postgres_concurrent_emit_no_duplicate_seq() -> None:
@@ -941,5 +954,144 @@ async def test_postgres_concurrent_emit_no_duplicate_seq() -> None:
         f"Expected 0..{n_workers - 1}, got {seqs}"
     )
     assert len(set(seqs)) == n_workers
+
+    # Cleanup: delete test data
+    async with maker() as session:
+        await session.execute(
+            select(AgentRunModel).where(AgentRunModel.id == rid),
+        )
+        run_to_delete = (await session.execute(
+            select(AgentRunModel).where(AgentRunModel.id == rid),
+        )).scalar_one_or_none()
+        if run_to_delete:
+            await session.delete(run_to_delete)
+            await session.commit()
+
+    await engine.dispose()
+
+
+@pytest.mark.real_db
+@pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
+@pytest.mark.asyncio
+async def test_postgres_event_recoverable_after_sse_failure() -> None:
+    """SSE 发布失败后，已提交事件可通过新 Session 从数据库重读。
+
+    验证：
+    - 发布失败不阻止持久化（commit 已成功）
+    - 新 Session 可通过 get_events_since 查到已提交事件
+    - event id 和 sequence_no 正确
+    - 再次 emit 后 sequence_no 继续递增
+    """
+    import uuid
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from apps.api.db.models.agent_run import AgentRun as AgentRunModel
+    from apps.api.db.models.user import User
+    from apps.api.repositories.agent_run import get_events_since
+    from apps.api.services.agent_event_sink import AgentEventSink
+
+    url = DATABASE_URL
+    for prefix in ("+psycopg", "+asyncpg"):
+        url = url.replace(prefix, "")
+    async_url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    engine = create_async_engine(async_url)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    # Create a new user + run
+    async with maker() as session:
+        user_result = await session.execute(select(User).limit(1))
+        user = user_result.scalar_one_or_none()
+        if user is None:
+            pytest.skip("No users in database")
+
+        rid = str(uuid.uuid4())
+        tid = str(uuid.uuid4())
+        run = AgentRunModel(id=rid, thread_id=tid, user_id=user.id, mode="qa")
+        session.add(run)
+        await session.commit()
+        run_user_id = str(user.id)
+
+    # Mock SSE publish to fail
+    import apps.api.services.sse_manager as sse_mod
+
+    original_publish = sse_mod.sse_manager.publish
+
+    async def _failing_publish(run_id, event):
+        raise ConnectionError("SSE publish failed")
+
+    sse_mod.sse_manager.publish = _failing_publish
+    try:
+        # Emit with mocked SSE failure
+        async with maker() as session:
+            sink = AgentEventSink()
+            result = await sink.emit(
+                run_id=rid,
+                event=AgentEventDraft(
+                    agent="coordinator",
+                    event_type="run.started",
+                    status="running",
+                    summary="persist-after-sse-fail",
+                ),
+                db_session=session,
+            )
+            first_event_id = result.id
+            first_seq = result.sequence_no
+            assert first_seq == 0
+
+        # NOW: use a NEW session to re-read from DB (independent session)
+        async with maker() as session:
+            events = await get_events_since(
+                session, rid, user_id=run_user_id, since_seq=-1,
+            )
+            assert len(events) >= 1, "Event should be queryable after SSE failure"
+            found = [e for e in events if str(e.id) == first_event_id]
+            assert len(found) == 1, "Committed event not found via new session"
+            assert found[0].sequence_no == 0
+            assert found[0].summary == "persist-after-sse-fail"
+
+        # Emit again — sequence_no should continue (1, not 0)
+        async with maker() as session:
+            sink = AgentEventSink()
+            result2 = await sink.emit(
+                run_id=rid,
+                event=AgentEventDraft(
+                    agent="coordinator",
+                    event_type="agent.summary",
+                    status="running",
+                    summary="second-after-failure",
+                ),
+                db_session=session,
+            )
+            assert result2.sequence_no == 1, (
+                f"Expected seq=1 after failure, got {result2.sequence_no}"
+            )
+
+        # Verify both events now queryable
+        async with maker() as session:
+            events = await get_events_since(
+                session, rid, user_id=run_user_id, since_seq=-1,
+            )
+            assert len(events) == 2
+            assert events[0].sequence_no == 0
+            assert events[1].sequence_no == 1
+    finally:
+        sse_mod.sse_manager.publish = original_publish
+        # Cleanup
+        async with maker() as session:
+            run_to_delete = (
+                await session.execute(
+                    select(AgentRunModel).where(AgentRunModel.id == rid),
+                )
+            ).scalar_one_or_none()
+            if run_to_delete:
+                await session.delete(run_to_delete)
+                await session.commit()
 
     await engine.dispose()
