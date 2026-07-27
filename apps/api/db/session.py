@@ -24,7 +24,7 @@ def _build_async_url() -> str:
     for prefix in ("+psycopg", "+asyncpg"):
         url = url.replace(prefix, "")
     if "://" not in url:
-        raise ValueError(f"Invalid DATABASE_URL: {settings.database_url}")
+        raise ValueError("Invalid DATABASE_URL")
     return url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 

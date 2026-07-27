@@ -45,7 +45,7 @@ async def health_ready(trace_id: str = Depends(trace_id_dependency)) -> JSONResp
             await conn.close()
             db_ok = True
         except Exception as exc:
-            db_error = f"{type(exc).__name__}: {exc}"
+            db_error = type(exc).__name__
             logger.warning(
                 "database not ready: component=database type=%s error=%s trace_id=%s",
                 type(exc).__name__, exc, trace_id,

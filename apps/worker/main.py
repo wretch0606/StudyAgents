@@ -63,7 +63,7 @@ async def _check_health() -> HealthReport:
         await engine.dispose()
         report.add_check("database", True)
     except Exception as exc:
-        report.add_check("database", False, str(exc))
+        report.add_check("database", False, type(exc).__name__)
 
     if report.all_ok():
         report.status = WorkerStatus.ready
