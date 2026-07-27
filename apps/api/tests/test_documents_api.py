@@ -24,6 +24,15 @@ def _login(client, username: str, password: str) -> None:
     client.cookies = r.cookies
 
 
+@pytest.fixture(autouse=True)
+def _clear_rate_limiter():
+    """每个测试前清理限速器，避免跨测试累积。"""
+    import apps.api.services.auth as auth_svc
+    auth_svc._rate_store.clear()
+    import apps.api.dependencies.auth as auth_dep
+    auth_dep._csrf_store.clear()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """使用真实 create_app + 测试文件目录。"""
