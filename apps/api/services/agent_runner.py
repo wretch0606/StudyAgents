@@ -307,17 +307,7 @@ class AgentRunnerService:
         rid = str(_uuid.uuid4())
         trace = f"trace-{_uuid.uuid4().hex[:16]}"
 
-        # Step 1: 插入用户消息
-        await chat_repo.insert_message(
-            session,
-            session_id=session_id,
-            user_id=user_id,
-            role="user",
-            content=user_input,
-            run_id=rid,
-        )
-
-        # Step 2: 创建 AgentRun
+        # Step 1: 创建 AgentRun（必须先于 message，因 message.run_id FK）
         run = AgentRunModel(
             id=rid,
             thread_id=tid,
@@ -326,6 +316,16 @@ class AgentRunnerService:
             trace_id=trace,
         )
         session.add(run)
+
+        # Step 2: 插入用户消息
+        await chat_repo.insert_message(
+            session,
+            session_id=session_id,
+            user_id=user_id,
+            role="user",
+            content=user_input,
+            run_id=rid,
+        )
 
         # Step 3: 发射 run.started 事件
         draft = AgentEventDraft(
@@ -349,8 +349,8 @@ class AgentRunnerService:
         )
         session.add(db_event)
 
-        # Step 4: 提交事务
-        await session.flush()
+        # Step 4: 提交事务（后台任务需要独立 session 能读到 run）
+        await session.commit()
 
         # Step 5: 启动后台执行
         task = asyncio.create_task(
@@ -460,7 +460,7 @@ class AgentRunnerService:
             .values(
                 status=QUEUED,
                 error_code="WORKER_RECOVERED",
-                error_summary="Worker 重启后自动恢复",
+                error="Worker 重启后自动恢复",
                 updated_at=now,
             ),
         )
