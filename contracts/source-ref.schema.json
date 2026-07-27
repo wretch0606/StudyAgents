@@ -2,47 +2,54 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://studyagents.local/schemas/source-ref.schema.json",
   "title": "SourceRef",
+  "description": "B 提供：指向原始资料的可引用证据。检索后由知识 Agent 消费。",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "document_id",
     "document_name",
-    "page_no",
+    "page_number",
     "chunk_id",
     "excerpt"
   ],
   "properties": {
     "document_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "文档 UUID"
     },
     "document_name": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "文档展示名，如 '光学讲义.pdf'"
     },
-    "page_no": {
+    "page_number": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "description": "页码，从 1 开始"
     },
     "question_no": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"],
+      "description": "题号，如 '3' 或 '二.1'，非真题为 null"
     },
     "chunk_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "知识块 UUID"
     },
     "excerpt": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "摘录文本，≤300 字"
     },
     "page_image_url": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"],
+      "description": "页图 URL，格式 /api/documents/{id}/pages/{n}/image"
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "description": "RRF 融合分数，越高越相关。典型值 0.005–0.033"
     }
   }
 }
