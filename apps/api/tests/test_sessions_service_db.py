@@ -108,7 +108,10 @@ async def test_list_sessions_owner_isolation() -> None:
     # User A creates 2 sessions
     async with maker() as s:
         for _ in range(2):
-            await create_chat_session(s, session_id=str(_uuid.uuid4()), user_id=users[0].id, thread_id=str(_uuid.uuid4()))
+            await create_chat_session(
+                s, session_id=str(_uuid.uuid4()),
+                user_id=users[0].id, thread_id=str(_uuid.uuid4()),
+            )
         await s.commit()
 
     # User A sees 2+ sessions, User B sees 0 of A's
@@ -139,7 +142,9 @@ async def test_get_session_other_user_not_found() -> None:
 
     sid = str(_uuid.uuid4())
     async with maker() as s:
-        await create_chat_session(s, session_id=sid, user_id=users[0].id, thread_id=str(_uuid.uuid4()))
+        await create_chat_session(
+            s, session_id=sid, user_id=users[0].id, thread_id=str(_uuid.uuid4()),
+        )
         await s.commit()
 
     async with maker() as s:
@@ -170,7 +175,9 @@ async def test_start_qa_creates_run_and_message() -> None:
 
     sid = await _create_session_row(maker, users[0].id, "QA Test")
 
-    svc = AgentRunnerService(runner=FakeAgentRunner(delay_ms=0), model_gateway=None, event_sink=_fake_sink())
+    svc = AgentRunnerService(
+        runner=FakeAgentRunner(delay_ms=0), model_gateway=None, event_sink=_fake_sink(),
+    )
 
     start = time.monotonic()
     async with maker() as s:
@@ -182,7 +189,8 @@ async def test_start_qa_creates_run_and_message() -> None:
 
     # Verify AgentRun committed
     async with maker() as s:
-        run_row = (await s.execute(select(AgentRunModel).where(AgentRunModel.id == result["run_id"]))).scalar_one_or_none()
+        stmt = select(AgentRunModel).where(AgentRunModel.id == result["run_id"])
+        run_row = (await s.execute(stmt)).scalar_one_or_none()
         assert run_row is not None
         assert run_row.user_id == users[0].id
 
@@ -193,7 +201,8 @@ async def test_start_qa_creates_run_and_message() -> None:
 
     # Verify run completed
     async with maker() as s:
-        run_row = (await s.execute(select(AgentRunModel).where(AgentRunModel.id == result["run_id"]))).scalar_one_or_none()
+        stmt = select(AgentRunModel).where(AgentRunModel.id == result["run_id"])
+        run_row = (await s.execute(stmt)).scalar_one_or_none()
         assert run_row is not None
         assert run_row.status == "completed"
 
@@ -342,13 +351,19 @@ async def test_assistant_message_idempotent() -> None:
 
     # First assistant — succeeds
     async with maker() as s:
-        await insert_message(s, session_id=sid, user_id=uid, role="assistant", content="Answer", run_id=rid)
+        await insert_message(
+            s, session_id=sid, user_id=uid,
+            role="assistant", content="Answer", run_id=rid,
+        )
         await s.commit()
 
     # Second assistant — must fail (partial unique index)
     async with maker() as s:
         with pytest.raises(Exception):
-            await insert_message(s, session_id=sid, user_id=uid, role="assistant", content="Answer 2", run_id=rid)
+            await insert_message(
+                s, session_id=sid, user_id=uid,
+                role="assistant", content="Answer 2", run_id=rid,
+            )
             await s.commit()
 
     await engine.dispose()
