@@ -19,8 +19,10 @@ needs_db = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 
 
 def _login(client, username: str, password: str) -> None:
+    import apps.api.services.auth as svc
+    svc._rate_store.clear()
     r = client.post("/api/auth/login", json={"username": username, "password": password})
-    assert r.status_code == 200, f"Login failed: {r.text}"
+    assert r.status_code == 200, f"Login failed ({username}): {r.status_code} {r.text[:200]}"
     client.cookies = r.cookies
 
 
