@@ -5,17 +5,38 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from apps.api.services.event_types import AgentEventType
+
+# Size limits to prevent events from becoming full-text channels
+MAX_SUMMARY_LENGTH = 2000
+MAX_SOURCE_REFS = 20
 
 # ---- C 提交的事件草稿 ----
 
+
 class AgentEventDraft(BaseModel):
-    """C 生成的事件草稿 — 通过 AgentEventSink.emit() 提交。"""
+    """C 生成的事件草稿 — 通过 AgentEventSink.emit() 提交。
+
+    仅允许白名单字段；extra=forbid 阻止私有字段注入。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     agent: str
-    event_type: str
+    event_type: AgentEventType
     status: str
-    summary: str
-    source_refs: list[dict] = Field(default_factory=list)
+    summary: str = Field(
+        default="",
+        max_length=MAX_SUMMARY_LENGTH,
+        description="事件摘要，最长 2000 字符",
+    )
+    source_refs: list[dict] = Field(
+        default_factory=list,
+        max_length=MAX_SOURCE_REFS,
+        description="引用来源，最多 20 条",
+    )
     duration_ms: int | None = None
 
 

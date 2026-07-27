@@ -53,10 +53,12 @@ class SSEManager:
     def is_completed(self, run_id: str) -> bool:
         return run_id in self._run_completed
 
-    async def sse_endpoint(self, run_id: str, request_headers: dict) -> StreamingResponse:
+    async def sse_endpoint(
+        self, run_id: str, request_headers: dict, *, user_id: str,
+    ) -> StreamingResponse:
         """FastAPI 路由可直接返回的 SSE StreamingResponse。
 
-        支持 Last-Event-ID 补发。
+        支持 Last-Event-ID 补发。user_id 用于属主隔离。
         """
         queue = await self.connect(run_id)
 
@@ -69,7 +71,9 @@ class SSEManager:
                     from apps.api.db.session import _get_sessionmaker
                     from apps.api.repositories.agent_run import get_events_since
                     async with _get_sessionmaker()() as session:
-                        events = await get_events_since(session, run_id, since)
+                        events = await get_events_since(
+                            session, run_id, user_id=user_id, since_seq=since,
+                        )
                         for evt in events:
                             pub = _to_public(evt)
                             msg = json.dumps(pub.model_dump(), ensure_ascii=False)

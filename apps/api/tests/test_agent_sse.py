@@ -131,12 +131,15 @@ async def test_event_sink_concurrent_no_duplicate_seq() -> None:
 
     async def emit_one(i: int):
         return await sink.emit(run_id="r-concurrent", event=AgentEventDraft(
-            agent="test", event_type="test", status="running", summary=f"event-{i}",
+            agent="coordinator", event_type="agent.summary", status="running", summary=f"event-{i}",
         ), db_session=db)
 
     results = []
     for i in range(10):
         results.append(await emit_one(i))
+    # Note: event_type literal validation bypassed here because FakeDB replaces
+    # the repo layer, but the AgentEventDraft still validates. Tests use
+    # "agent.summary" as a valid event type.
     seqs = [r.sequence_no for r in results]
     assert len(seqs) == len(set(seqs)) == 10
 
@@ -190,8 +193,8 @@ async def test_sse_manager_publish_to_multiple_clients() -> None:
     q2 = await mgr.connect("r-multi")
 
     evt = AgentEvent(
-        id="evt-1", run_id="r-multi", sequence_no=0, agent="test",
-        event_type="test", status="running", summary="multi", source_refs=[],
+        id="evt-1", run_id="r-multi", sequence_no=0, agent="coordinator",
+        event_type="agent.summary", status="running", summary="multi", source_refs=[],
         created_at="2026-01-01T00:00:00",
     )
     await mgr.publish("r-multi", evt)

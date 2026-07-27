@@ -62,7 +62,7 @@ async def get_agent_run_events(
         raise ApiError("RESOURCE_NOT_FOUND", "Run 不存在。", status_code=404, retryable=False)
     _check_owner(run, user_id)
     headers = {k.lower(): v for k, v in request.headers.items()}
-    return await sse_manager.sse_endpoint(run_id, headers)
+    return await sse_manager.sse_endpoint(run_id, headers, user_id=user_id)
 
 
 # ---- POST /api/agent-runs/{run_id}/retry ----
