@@ -86,15 +86,45 @@ async def retry_agent_run(
             retryable=False,
         )
 
-    # 尝试查找可用的 dispatcher
-    try:
-        # 生产路径：需要通过 C 的 dispatcher 重新调度
-        # 当前 C 未接入，返回明确错误
+    # 通过 AgentRunnerService 重试
+    from apps.api.services.agent_runner import (
+        AgentRunnerError,
+        agent_runner_service,
+    )
+
+    if agent_runner_service is None:
         raise ApiError(
             "AGENT_DISPATCHER_NOT_CONFIGURED",
-            "Agent 执行器尚未配置，无法重试。请等待 C 模块接入。",
+            "Agent 执行器尚未配置，无法重试。请调用 init_agent_runner() 初始化。",
             status_code=503,
             retryable=True,
         )
-    except ApiError:
-        raise
+
+    try:
+        result = await agent_runner_service.retry_run(
+            run_id=run_id, user_id=user_id, session=session,
+        )
+        return RetryAgentRunResponse(
+            run=AgentRunSummary(
+                id=str(run.id),
+                thread_id=str(run.thread_id),
+                mode=run.mode,
+                status=result["status"],
+                model=run.model,
+                model_calls=run.model_calls,
+                node_hops=run.node_hops,
+                input_tokens=run.input_tokens,
+                output_tokens=run.output_tokens,
+                estimated_cost_cny=run.estimated_cost_cny,
+                error=run.error,
+                started_at=run.started_at.isoformat() if run.started_at else None,
+                completed_at=run.completed_at.isoformat() if run.completed_at else None,
+                created_at=run.created_at.isoformat() if run.created_at else "",
+            ),
+            event_url=result["event_url"],
+        )
+    except AgentRunnerError as exc:
+        raise ApiError(
+            exc.code, exc.message,
+            status_code=exc.status_code, retryable=exc.retryable,
+        ) from exc
