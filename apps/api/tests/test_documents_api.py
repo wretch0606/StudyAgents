@@ -35,13 +35,12 @@ def _clear_rate_limiter():
     auth_dep._csrf_store.clear()
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    """使用真实 create_app + 测试文件目录。"""
-    monkeypatch.setattr(
-        "apps.api.services.file_storage.settings.files_root",
-        str(tmp_path),
-    )
+@pytest.fixture(scope="module")
+def client(tmp_path_factory):
+    """使用真实 create_app + 测试文件目录（模块级别避免 event loop 冲突）。"""
+    import os
+    tmp_path = tmp_path_factory.mktemp("docs")
+    os.environ["FILES_ROOT"] = str(tmp_path)
     from apps.api.main import create_app
     from fastapi.testclient import TestClient
     app = create_app()
