@@ -7,138 +7,22 @@
 //   2. 中间：PDF/OCR 导入入口 + 含拒答场景的 Mock 对话
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
-import { ref, nextTick } from 'vue'
-import qaSuccess from '../../../../contracts/mock/qa-success.json'
-import qaRefusal from '../../../../contracts/mock/qa-refusal.json'
+import { ref, nextTick, onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useChatStore } from '../stores/useChatStore'
+import type { SourceRefDisplay } from '../stores/useChatStore'
 
 // =========================================================
-// Mock JSON 类型定义（对齐 contracts/mock/*.json 结构）
-// =========================================================
-interface MockSourceRefRaw {
-  document_id: string
-  document_name: string
-  page_number: number
-  chunk_id: string
-  excerpt: string
-}
-
-interface MockAgentEventRaw {
-  id: string
-  agent: string
-  event_type: string
-  status: string
-  summary: string
-  duration_ms?: number
-}
-
-interface MockQaData {
-  scenario: { mode: string; user_input: string }
-  public_response: {
-    run_id: string
-    status: string
-    answer?: { conclusion: string; reasoning: string[]; note: string }
-    refusal?: { reason: string; message: string; searched_scope: string; suggestion: string; retry_hint: string }
-    source_refs?: MockSourceRefRaw[]
-    agent_events: MockAgentEventRaw[]
-    created_at: string
-  }
-}
-
-// =========================================================
-// 数据变换：JSON → 组件内部类型
+// 聊天状态（Pinia Store）
 // =========================================================
 
-const AGENT_LABEL_MAP: Record<string, { role: AgentStep['agentRole']; label: string }> = {
-  coordinator: { role: 'coordinator', label: 'Coordinator · 协调调度' },
-  knowledge: { role: 'knowledge', label: 'Knowledge · 检索溯源' },
-  questioner: { role: 'questioner', label: 'Questioner · 出题组卷' },
-  evaluator: { role: 'evaluator', label: 'Evaluator · 分步评分' },
-}
+const chatStore = useChatStore()
+const { messages, agentSteps, sourceRefs, isStreaming } = storeToRefs(chatStore)
 
-function mapAgentEvents(events: MockAgentEventRaw[]): AgentStep[] {
-  const eventByAgent = new Map(events.map((e) => [e.agent, e]))
-  const allRoles: AgentStep['agentRole'][] = ['coordinator', 'knowledge', 'questioner', 'evaluator']
-
-  return allRoles.map((role) => {
-    const evt = eventByAgent.get(role)
-    if (evt) {
-      return {
-        agentRole: role,
-        agentLabel: AGENT_LABEL_MAP[role]?.label ?? role,
-        status: (evt.status === 'succeeded' ? 'succeeded' : evt.status === 'running' ? 'running' : evt.status === 'failed' ? 'failed' : 'idle') as AgentStep['status'],
-        summary: evt.summary,
-        durationMs: evt.duration_ms,
-      }
-    }
-    return {
-      agentRole: role,
-      agentLabel: AGENT_LABEL_MAP[role]?.label ?? role,
-      status: 'idle' as const,
-      summary: role === 'questioner'
-        ? '当前为问答模式，Questioner Agent 处于待命状态'
-        : role === 'evaluator'
-          ? '当前为问答模式，Evaluator Agent 处于待命状态'
-          : '待命',
-    }
-  })
-}
-
-function mapSourceRefs(refs: MockSourceRefRaw[]): SourceRefDisplay[] {
-  return refs.map((ref, i) => ({
-    refId: `S${i + 1}`,
-    documentName: ref.document_name,
-    pageNumber: ref.page_number,
-    excerpt: ref.excerpt,
-  }))
-}
-
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return '--:--'
-  }
-}
-
-/** 将 answer 对象格式化为 Markdown 气泡内容，注入 [S#] 引用标记 */
-function buildAnswerContent(answer: MockQaData['public_response']['answer'], refCount: number): string {
-  if (!answer) return ''
-  const lines: string[] = []
-  lines.push(`**${answer.conclusion}** [S1]`)
-  if (answer.reasoning.length > 0) {
-    lines.push('')
-    lines.push('### 论证过程')
-    answer.reasoning.forEach((r, i) => { lines.push(`${i + 1}. ${r}`) })
-  }
-  if (refCount > 1 && answer.note) {
-    lines.push('')
-    lines.push(`> ${answer.note} [S${refCount}]`)
-  } else if (answer.note) {
-    lines.push('')
-    lines.push(`> ${answer.note}`)
-  }
-  return lines.join('\n')
-}
-
-/** 将 refusal 对象格式化为拒答气泡内容 */
-function buildRefusalContent(refusal: MockQaData['public_response']['refusal']): string {
-  if (!refusal) return ''
-  return [
-    '⚠️ **抱歉，我无法回答这个问题。**',
-    '',
-    `**拒答原因**：${refusal.message}`,
-    '',
-    `**检索范围**：${refusal.searched_scope}`,
-    '',
-    `**建议**：${refusal.suggestion}`,
-    '',
-    `💡 **重试提示**：${refusal.retry_hint}`,
-  ].join('\n')
-}
-
-// ---- 从 Mock JSON 提取数据 ----
-const successRefs = mapSourceRefs((qaSuccess as MockQaData).public_response.source_refs ?? [])
-const successEvents = mapAgentEvents((qaSuccess as MockQaData).public_response.agent_events)
+// ---- 页面挂载时发起网络请求获取对话历史 ----
+onMounted(() => {
+  chatStore.fetchHistory()
+})
 
 // =========================================================
 // 导航模式（对话 / 训练 / 错题本）
@@ -194,128 +78,30 @@ const overallMastery = ref(0.64)
 const pendingWrongCount = ref(7)
 
 // =========================================================
-// 四类 Agent 协同工作流（Mock 状态）
-// =========================================================
-interface AgentStep {
-  agentRole: 'coordinator' | 'knowledge' | 'questioner' | 'evaluator'
-  agentLabel: string
-  status: 'idle' | 'running' | 'succeeded' | 'failed'
-  summary: string
-  detail?: string
-  durationMs?: number
-}
-
-const agentSteps = ref<AgentStep[]>(successEvents)
-
-// =========================================================
-// 文档溯源卡片（SourceRef — Mock 数据）
-// =========================================================
-interface SourceRefDisplay {
-  refId: string
-  documentName: string
-  pageNumber: number
-  excerpt: string
-}
-
-const sourceRefs = ref<SourceRefDisplay[]>(successRefs)
-
-// =========================================================
-// 聊天消息（Mock — 含拒答场景）
-// =========================================================
-interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  timestamp: string
-  /** 关联的引用 ID 列表（仅 assistant 消息） */
-  citationIds?: string[]
-  /** 是否为拒答消息 */
-  isRefusal?: boolean
-}
-
-// ---- 从两套 Mock JSON 构建对话列表 ----
-const successData = qaSuccess as MockQaData
-const refusalData = qaRefusal as MockQaData
-const successSrcRefs = successData.public_response.source_refs ?? []
-
-const messages = ref<ChatMessage[]>([
-  // ===== Q&A 1：成功回答（qa-success.json）=====
-  {
-    id: 'mock-success-u',
-    role: 'user',
-    content: successData.scenario.user_input,
-    timestamp: formatTime(successData.public_response.created_at),
-  },
-  {
-    id: 'mock-success-a',
-    role: 'assistant',
-    content: buildAnswerContent(successData.public_response.answer, successSrcRefs.length),
-    timestamp: formatTime(successData.public_response.created_at),
-    citationIds: successSrcRefs.map((_, i) => `S${i + 1}`),
-  },
-  // ===== Q&A 2：拒答（qa-refusal.json）=====
-  {
-    id: 'mock-refusal-u',
-    role: 'user',
-    content: refusalData.scenario.user_input,
-    timestamp: formatTime(refusalData.public_response.created_at),
-  },
-  {
-    id: 'mock-refusal-a',
-    role: 'assistant',
-    content: buildRefusalContent(refusalData.public_response.refusal),
-    timestamp: formatTime(refusalData.public_response.created_at),
-    isRefusal: true,
-  },
-])
-
-// =========================================================
-// 用户输入 & 发送（Mock）
+// 用户输入 & 发送（已接入 SSE 流式打字机模拟）
 // =========================================================
 const inputText = ref('')
-const isStreaming = ref(false)
 const chatContainerRef = ref<InstanceType<typeof import('element-plus').ElScrollbar> | null>(null)
 
 async function handleSend() {
   const text = inputText.value.trim()
   if (!text || isStreaming.value) return
 
-  messages.value.push({
+  // 1. 将用户输入作为新消息加入 Store
+  chatStore.addMessage({
     id: `m${Date.now()}`,
     role: 'user',
     content: text,
     timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
   })
+
+  // 2. 清空输入框
   inputText.value = ''
 
-  isStreaming.value = true
-  await new Promise((r) => setTimeout(r, 1800))
+  // 3. 触发纯前端模拟的 SSE 流式打字机回复
+  //    （真实对接后替换为 EventSource / fetch 流读取）
+  await chatStore.simulateStreamingResponse()
 
-  // 简易拒答判断：含 "GPT"、"Claude"、"大模型" 等关键词
-  const refusalKeywords = ['GPT', 'Claude', '大模型', 'LLM', 'ChatGPT', 'Gemini', '文心一言']
-  const shouldRefuse = refusalKeywords.some((kw) => text.includes(kw))
-
-  if (shouldRefuse) {
-    messages.value.push({
-      id: `m${Date.now() + 1}`,
-      role: 'assistant',
-      content:
-        '⚠️ **抱歉，我无法回答这个问题。**\n\n当前已导入的课程资料中未检索到与此问题相关的内容。StudyAgents 严格遵循文档溯源原则，证据不足时主动拒答，不使用模型通识补全课程事实。\n\n您可以尝试：导入相关资料、换个课程范围内的问题、或进入专项训练模式进行练习。',
-      timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-      isRefusal: true,
-    })
-  } else {
-    messages.value.push({
-      id: `m${Date.now() + 1}`,
-      role: 'assistant',
-      content:
-        '这是一个模拟的 AI 回复。在实际部署中，Coordinator Agent 将调度 Knowledge Agent 检索课程资料，所有回答均附带文档名、页码和证据片段的引用（SourceRef），确保每一句话都可溯源、可复核。\n\n引用示例：[S1] 《计算机网络.pdf》第 45 页。',
-      timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-      citationIds: ['S1'],
-    })
-  }
-
-  isStreaming.value = false
   await nextTick()
   scrollToBottom()
 }
@@ -350,10 +136,10 @@ function toggleDrawer() {
 }
 
 // =========================================================
-// 获取引用详情
+// 获取引用详情（委托给 Store）
 // =========================================================
 function getRefById(refId: string): SourceRefDisplay | undefined {
-  return sourceRefs.value.find((r) => r.refId === refId)
+  return chatStore.getRefById(refId)
 }
 
 // =========================================================
@@ -696,7 +482,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
             placeholder="输入问题，基于课程资料获取可信回答（Ctrl+Enter 发送）..."
             class="chat-textarea"
             :disabled="isStreaming"
-            @keydown.enter.exact="handleSend"
+            @keydown.enter.exact.prevent="handleSend"
           />
           <button class="btn-send" :disabled="!inputText.trim() || isStreaming" @click="handleSend" title="发送">
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
