@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import io
 import os
-import uuid as _uuid
 import sys
+import uuid as _uuid
 from pathlib import Path
 
 import pytest
@@ -98,13 +98,15 @@ def test_member_list_403(client) -> None:
 @needs_db
 def test_member_delete_403(client) -> None:
     token = _login(client, "member_a", "test-pass-123")
-    assert client.delete("/api/documents/some-id", headers={"X-CSRF-Token": token}).status_code == 403
+    resp = client.delete("/api/documents/some-id", headers={"X-CSRF-Token": token})
+    assert resp.status_code == 403
 
 
 @needs_db
 def test_member_retry_403(client) -> None:
     token = _login(client, "member_a", "test-pass-123")
-    assert client.post("/api/ingestion-jobs/some-id/retry", headers={"X-CSRF-Token": token}).status_code == 403
+    resp = client.post("/api/ingestion-jobs/some-id/retry", headers={"X-CSRF-Token": token})
+    assert resp.status_code == 403
 
 
 # ============================================================
