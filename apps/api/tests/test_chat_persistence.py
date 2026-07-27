@@ -231,7 +231,7 @@ async def test_chat_session_owner_isolation() -> None:
         # User A can retrieve their own session
         found = await get_chat_session(session, sid, user_id=user_a.id)
         assert found is not None
-        assert found.id == sid
+        assert str(found.id) == sid
 
         # User B should NOT be able to retrieve user A's session
         not_found = await get_chat_session(session, sid, user_id=user_b.id)

@@ -249,3 +249,36 @@ async def test_retry_requires_auth(app) -> None:
     async with AsyncClient(transport=t, base_url="http://test") as ac:
         resp = await ac.post("/api/agent-runs/some-id/retry")
         assert resp.status_code == 401
+
+
+# ============================================================
+# 8. QA P95 延时测试
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_qa_p95_latency_under_2s(admin) -> None:
+    """30 次 QA 启动，P95 延时 ≤ 2 秒。"""
+    ac, token = admin
+    N = 30
+    latencies: list[float] = []
+
+    for _ in range(N):
+        sid = await _session(admin)
+        start = time.monotonic()
+        resp = await ac.post(
+            f"/api/sessions/{sid}/qa",
+            json={"user_input": "test"},
+            headers={"X-CSRF-Token": token},
+        )
+        elapsed = time.monotonic() - start
+        assert resp.status_code == 202, resp.text
+        latencies.append(elapsed)
+
+    latencies.sort()
+    p50 = latencies[int(N * 0.50)]
+    p95 = latencies[int(N * 0.95)]
+    p_max = latencies[-1]
+
+    assert p95 <= 2.0, (
+        f"P95={p95:.3f}s exceeds 2s. P50={p50:.3f}s max={p_max:.3f}s N={N}"
+    )
