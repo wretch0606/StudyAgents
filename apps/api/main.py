@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from apps.api.config import settings
 from apps.api.middleware.logging import setup_logging
 from apps.api.middleware.trace import TraceMiddleware, get_trace_id
-from apps.api.routers import admin, auth, health
+from apps.api.routers import admin, agent_runs, auth, health
 from apps.api.schemas.error import ApiError, ApiErrorResponse
 
 
@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
     app.include_router(admin.router, prefix="/api")
+    app.include_router(agent_runs.router, prefix="/api")
 
     # ---- 异常处理 ----
     @app.exception_handler(ApiError)
