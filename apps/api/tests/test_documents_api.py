@@ -72,13 +72,13 @@ def test_member_list_403(client) -> None:
 
 @needs_db
 def test_member_delete_403(client) -> None:
-    _login(client, "member_b", "test-pass-123")
+    _login(client, "member_a", "test-pass-123")
     assert client.delete("/api/documents/some-id").status_code == 403
 
 
 @needs_db
 def test_member_retry_403(client) -> None:
-    _login(client, "member_c", "test-pass-123")
+    _login(client, "member_a", "test-pass-123")
     assert client.post("/api/ingestion-jobs/some-id/retry").status_code == 403
 
 
