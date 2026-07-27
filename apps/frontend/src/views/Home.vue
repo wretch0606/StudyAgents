@@ -8,6 +8,137 @@
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
 import { ref, nextTick } from 'vue'
+import qaSuccess from '../../../../contracts/mock/qa-success.json'
+import qaRefusal from '../../../../contracts/mock/qa-refusal.json'
+
+// =========================================================
+// Mock JSON 类型定义（对齐 contracts/mock/*.json 结构）
+// =========================================================
+interface MockSourceRefRaw {
+  document_id: string
+  document_name: string
+  page_number: number
+  chunk_id: string
+  excerpt: string
+}
+
+interface MockAgentEventRaw {
+  id: string
+  agent: string
+  event_type: string
+  status: string
+  summary: string
+  duration_ms?: number
+}
+
+interface MockQaData {
+  scenario: { mode: string; user_input: string }
+  public_response: {
+    run_id: string
+    status: string
+    answer?: { conclusion: string; reasoning: string[]; note: string }
+    refusal?: { reason: string; message: string; searched_scope: string; suggestion: string; retry_hint: string }
+    source_refs?: MockSourceRefRaw[]
+    agent_events: MockAgentEventRaw[]
+    created_at: string
+  }
+}
+
+// =========================================================
+// 数据变换：JSON → 组件内部类型
+// =========================================================
+
+const AGENT_LABEL_MAP: Record<string, { role: AgentStep['agentRole']; label: string }> = {
+  coordinator: { role: 'coordinator', label: 'Coordinator · 协调调度' },
+  knowledge: { role: 'knowledge', label: 'Knowledge · 检索溯源' },
+  questioner: { role: 'questioner', label: 'Questioner · 出题组卷' },
+  evaluator: { role: 'evaluator', label: 'Evaluator · 分步评分' },
+}
+
+function mapAgentEvents(events: MockAgentEventRaw[]): AgentStep[] {
+  const eventByAgent = new Map(events.map((e) => [e.agent, e]))
+  const allRoles: AgentStep['agentRole'][] = ['coordinator', 'knowledge', 'questioner', 'evaluator']
+
+  return allRoles.map((role) => {
+    const evt = eventByAgent.get(role)
+    if (evt) {
+      return {
+        agentRole: role,
+        agentLabel: AGENT_LABEL_MAP[role]?.label ?? role,
+        status: (evt.status === 'succeeded' ? 'succeeded' : evt.status === 'running' ? 'running' : evt.status === 'failed' ? 'failed' : 'idle') as AgentStep['status'],
+        summary: evt.summary,
+        durationMs: evt.duration_ms,
+      }
+    }
+    return {
+      agentRole: role,
+      agentLabel: AGENT_LABEL_MAP[role]?.label ?? role,
+      status: 'idle' as const,
+      summary: role === 'questioner'
+        ? '当前为问答模式，Questioner Agent 处于待命状态'
+        : role === 'evaluator'
+          ? '当前为问答模式，Evaluator Agent 处于待命状态'
+          : '待命',
+    }
+  })
+}
+
+function mapSourceRefs(refs: MockSourceRefRaw[]): SourceRefDisplay[] {
+  return refs.map((ref, i) => ({
+    refId: `S${i + 1}`,
+    documentName: ref.document_name,
+    pageNumber: ref.page_number,
+    excerpt: ref.excerpt,
+  }))
+}
+
+function formatTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return '--:--'
+  }
+}
+
+/** 将 answer 对象格式化为 Markdown 气泡内容，注入 [S#] 引用标记 */
+function buildAnswerContent(answer: MockQaData['public_response']['answer'], refCount: number): string {
+  if (!answer) return ''
+  const lines: string[] = []
+  lines.push(`**${answer.conclusion}** [S1]`)
+  if (answer.reasoning.length > 0) {
+    lines.push('')
+    lines.push('### 论证过程')
+    answer.reasoning.forEach((r, i) => { lines.push(`${i + 1}. ${r}`) })
+  }
+  if (refCount > 1 && answer.note) {
+    lines.push('')
+    lines.push(`> ${answer.note} [S${refCount}]`)
+  } else if (answer.note) {
+    lines.push('')
+    lines.push(`> ${answer.note}`)
+  }
+  return lines.join('\n')
+}
+
+/** 将 refusal 对象格式化为拒答气泡内容 */
+function buildRefusalContent(refusal: MockQaData['public_response']['refusal']): string {
+  if (!refusal) return ''
+  return [
+    '⚠️ **抱歉，我无法回答这个问题。**',
+    '',
+    `**拒答原因**：${refusal.message}`,
+    '',
+    `**检索范围**：${refusal.searched_scope}`,
+    '',
+    `**建议**：${refusal.suggestion}`,
+    '',
+    `💡 **重试提示**：${refusal.retry_hint}`,
+  ].join('\n')
+}
+
+// ---- 从 Mock JSON 提取数据 ----
+const successRefs = mapSourceRefs((qaSuccess as MockQaData).public_response.source_refs ?? [])
+const successEvents = mapAgentEvents((qaSuccess as MockQaData).public_response.agent_events)
 
 // =========================================================
 // 导航模式（对话 / 训练 / 错题本）
@@ -74,38 +205,7 @@ interface AgentStep {
   durationMs?: number
 }
 
-const agentSteps = ref<AgentStep[]>([
-  {
-    agentRole: 'coordinator',
-    agentLabel: 'Coordinator · 协调调度',
-    status: 'succeeded',
-    summary: '接收用户问题，分析意图为"计算机网络概念问答"，调度 Knowledge Agent 检索课程资料',
-    detail: '意图分类 → 关键词提取 → 调度 Knowledge Agent → 等待检索结果',
-    durationMs: 320,
-  },
-  {
-    agentRole: 'knowledge',
-    agentLabel: 'Knowledge · 检索溯源',
-    status: 'succeeded',
-    summary: '在《计算机网络.pdf》中检索到 3 条相关证据块，页码覆盖第 45–52 页',
-    detail: '向量检索 (pgvector) → 全文检索交叉验证 → 返回 SourceRef 列表 → 置信度评估',
-    durationMs: 1850,
-  },
-  {
-    agentRole: 'questioner',
-    agentLabel: 'Questioner · 出题组卷',
-    status: 'idle',
-    summary: '当前为问答模式，Questioner Agent 处于待命状态',
-    detail: '进入"专项训练"模式后自动激活，基于课程资料生成针对练习题',
-  },
-  {
-    agentRole: 'evaluator',
-    agentLabel: 'Evaluator · 分步评分',
-    status: 'idle',
-    summary: '当前为问答模式，Evaluator Agent 处于待命状态',
-    detail: '进入"专项训练"模式并提交答案后自动激活，按评分点分步评判并生成讲解',
-  },
-])
+const agentSteps = ref<AgentStep[]>(successEvents)
 
 // =========================================================
 // 文档溯源卡片（SourceRef — Mock 数据）
@@ -117,26 +217,7 @@ interface SourceRefDisplay {
   excerpt: string
 }
 
-const sourceRefs = ref<SourceRefDisplay[]>([
-  {
-    refId: 'S1',
-    documentName: '计算机网络.pdf',
-    pageNumber: 45,
-    excerpt: 'TCP 连接建立需要三次握手：客户端发送 SYN 报文（seq=x），服务端回复 SYN-ACK（seq=y, ack=x+1），客户端再发送 ACK（ack=y+1）完成连接建立。',
-  },
-  {
-    refId: 'S2',
-    documentName: '计算机网络.pdf',
-    pageNumber: 47,
-    excerpt: 'TCP 状态转换：CLOSED → LISTEN → SYN-RCVD → ESTABLISHED。四次挥手涉及 FIN 报文和 TIME-WAIT 状态，持续 2MSL 时间以确保最后的 ACK 能够到达。',
-  },
-  {
-    refId: 'S3',
-    documentName: '计算机网络.pdf',
-    pageNumber: 52,
-    excerpt: '拥塞控制算法包含四个阶段：慢启动（Slow Start）、拥塞避免（Congestion Avoidance）、快速重传（Fast Retransmit）和快速恢复（Fast Recovery）。',
-  },
-])
+const sourceRefs = ref<SourceRefDisplay[]>(successRefs)
 
 // =========================================================
 // 聊天消息（Mock — 含拒答场景）
@@ -152,45 +233,39 @@ interface ChatMessage {
   isRefusal?: boolean
 }
 
+// ---- 从两套 Mock JSON 构建对话列表 ----
+const successData = qaSuccess as MockQaData
+const refusalData = qaRefusal as MockQaData
+const successSrcRefs = successData.public_response.source_refs ?? []
+
 const messages = ref<ChatMessage[]>([
+  // ===== Q&A 1：成功回答（qa-success.json）=====
   {
-    id: 'm1',
+    id: 'mock-success-u',
     role: 'user',
-    content: '请帮我详细解释一下 TCP 协议的三次握手过程，以及为什么需要三次而不是两次？',
-    timestamp: '14:32',
+    content: successData.scenario.user_input,
+    timestamp: formatTime(successData.public_response.created_at),
   },
   {
-    id: 'm2',
+    id: 'mock-success-a',
     role: 'assistant',
-    content: '**TCP 三次握手（Three-Way Handshake）**是建立可靠传输连接的核心机制。\n\n### 三次握手流程\n\n1. **第一次握手**：客户端发送 SYN 报文，`seq = x`，客户端进入 `SYN-SENT` 状态。\n2. **第二次握手**：服务端收到后回复 SYN-ACK 报文，`seq = y, ack = x + 1`，服务端进入 `SYN-RCVD` 状态。\n3. **第三次握手**：客户端发送 ACK 报文，`ack = y + 1`，双方进入 `ESTABLISHED` 状态。[S1]\n\n### 为什么需要三次？\n\n- **防止历史连接初始化**：如果只有两次握手，服务端无法区分一个过期的 SYN 报文。三次握手让客户端有能力确认连接的时效性。[S2]\n- **同步初始序列号（ISN）**：双方需要确认对方的初始序列号，这是可靠传输的基础。[S1]\n\n### 状态机视角\n\n服务端经历 `CLOSED → LISTEN → SYN-RCVD → ESTABLISHED` 的状态变迁，而 `TIME-WAIT` 状态在连接关闭时确保最后的 ACK 可达。[S2]',
-    timestamp: '14:33',
-    citationIds: ['S1', 'S2'],
+    content: buildAnswerContent(successData.public_response.answer, successSrcRefs.length),
+    timestamp: formatTime(successData.public_response.created_at),
+    citationIds: successSrcRefs.map((_, i) => `S${i + 1}`),
   },
+  // ===== Q&A 2：拒答（qa-refusal.json）=====
   {
-    id: 'm3',
+    id: 'mock-refusal-u',
     role: 'user',
-    content: '那请帮我对比一下 GPT-4 和 Claude 的大模型架构设计原理，哪个更适合做代码生成？',
-    timestamp: '14:35',
+    content: refusalData.scenario.user_input,
+    timestamp: formatTime(refusalData.public_response.created_at),
   },
   {
-    id: 'm4',
+    id: 'mock-refusal-a',
     role: 'assistant',
-    content: '⚠️ **抱歉，我无法回答这个问题。**\n\n### 拒答原因\n\n当前已导入的课程资料（《计算机网络.pdf》等）中**未检索到任何与 "GPT-4 架构" 或 "Claude 模型设计" 相关的内容**。\n\nStudyAgents 严格遵循**文档溯源原则**：\n- 所有回答均须引用课程资料中的具体证据（SourceRef）\n- 不会使用模型通识或外部知识来补全课程中不存在的事实\n- 证据不足时主动拒答，确保信息的可靠性与可复核性\n\n### 您可以尝试\n\n- **导入相关资料**：点击输入框左侧的「导入 PDF」按钮，上传包含大模型架构知识的课程 PDF 或文档\n- **换个问题**：询问当前课程范围内的内容，例如计算机网络、操作系统、数据结构等\n- **专项训练**：进入左侧「专项训练」模式，基于已有资料进行针对性练习',
-    timestamp: '14:35',
+    content: buildRefusalContent(refusalData.public_response.refusal),
+    timestamp: formatTime(refusalData.public_response.created_at),
     isRefusal: true,
-  },
-  {
-    id: 'm5',
-    role: 'user',
-    content: '明白了，那请解释一下 TCP 的拥塞控制算法有哪些阶段？',
-    timestamp: '14:37',
-  },
-  {
-    id: 'm6',
-    role: 'assistant',
-    content: '**TCP 拥塞控制（Congestion Control）**是保证网络稳定性的关键机制，由 Van Jacobson 于 1988 年提出。[S3]\n\n### 四个核心阶段\n\n| 阶段 | 机制 | 特点 |\n|------|------|------|\n| **慢启动** | 拥塞窗口 `cwnd` 从 1 MSS 开始，每收到一个 ACK 指数增长（×2） | 快速探测可用带宽 |\n| **拥塞避免** | `cwnd` 达到慢启动阈值 `ssthresh` 后，改为线性增长（每 RTT +1 MSS） | 避免过度注入 |\n| **快速重传** | 收到 3 个重复 ACK 时，不等超时直接重传丢失报文 | 减少等待时间 |\n| **快速恢复** | 重传后不进入慢启动，而是将 `ssthresh` 设为 `cwnd/2`，直接进入拥塞避免 | 避免不必要的慢启动 |\n\n### 关键参数\n\n- **拥塞窗口 (cwnd)**：发送方维护的拥塞控制窗口\n- **慢启动阈值 (ssthresh)**：切换增长模式的临界值\n- **RTO (Retransmission Timeout)**：超时重传计时器\n\n当发生超时重传（RTO 超时），说明网络严重拥塞，`ssthresh` 被设为 `cwnd/2`，`cwnd` 重置为 1 MSS，重新进入慢启动。[S3]',
-    timestamp: '14:38',
-    citationIds: ['S3'],
   },
 ])
 
@@ -1983,5 +2058,131 @@ export function renderMarkdownLine(line: string): string {
 
 .practice-placeholder :deep(.el-select .el-input__inner) {
   color: var(--text-h);
+}
+
+/* ============================================================
+   移动端响应式适配（≤768px，覆盖 390px 场景）
+   ============================================================ */
+@media (max-width: 768px) {
+  /* ---- 整体容器：禁止横向溢出 ---- */
+  .home-shell {
+    overflow-x: hidden;
+  }
+
+  /* ---- 左侧边栏：隐藏 ---- */
+  .sidebar-left {
+    display: none;
+  }
+
+  /* ---- 右侧 Agent 抽屉：隐藏（覆盖 collapsed 态的 width:0）---- */
+  .sidebar-right {
+    display: none !important;
+  }
+
+  /* ---- 中间主问答区：占满全宽 ---- */
+  .chat-main {
+    width: 100%;
+    min-width: 100%;
+  }
+
+  /* ---- 聊天头部 ---- */
+  .chat-header {
+    padding: 10px 14px;
+  }
+
+  .chat-title {
+    font-size: 14px;
+  }
+
+  /* ---- 消息列表 ---- */
+  .messages-inner {
+    max-width: 100%;
+    padding: 14px 12px 8px;
+  }
+
+  .msg-body {
+    max-width: 82%;
+  }
+
+  .bubble {
+    font-size: 13.5px;
+    padding: 10px 14px;
+  }
+
+  /* ---- 引用标签 ---- */
+  .citation-chip {
+    font-size: 10px;
+    padding: 2px 8px;
+  }
+
+  /* ---- 底部输入区 ---- */
+  .chat-input-area {
+    padding: 8px 10px 10px;
+  }
+
+  .quick-prompts {
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .chip {
+    font-size: 11px;
+    padding: 3px 10px;
+  }
+
+  .input-row {
+    gap: 8px;
+  }
+
+  .btn-import {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+  }
+
+  .btn-import-label {
+    font-size: 8px;
+  }
+
+  .btn-send {
+    width: 40px;
+    height: 40px;
+  }
+
+  .input-hint {
+    margin-left: 0;
+    margin-top: 4px;
+    font-size: 10px;
+    text-align: center;
+  }
+
+  /* ---- 错题本视图 ---- */
+  .wrongbook-inner {
+    max-width: 100%;
+    padding: 14px 12px;
+  }
+
+  .wb-meta {
+    gap: 10px;
+  }
+
+  /* ---- 专项训练占位 ---- */
+  .practice-placeholder {
+    padding: 24px 16px;
+  }
+
+  .practice-config {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .practice-config :deep(.el-select) {
+    width: 100% !important;
+  }
+
+  .practice-desc {
+    font-size: 13px;
+    max-width: 100%;
+  }
 }
 </style>
