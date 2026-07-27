@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Env files
+.env
+.env.*
+
+# Data
+data/
+uploads/
+backups/
+*.sqlite3
+*.db
+
+# Test artifacts
+playwright-report/
+test-results/
+coverage/
+
+# Docker
+Dockerfile
+compose.yml
+.dockerignore
+
+# Docs and scripts
+scripts/
+docs/
+*.md
