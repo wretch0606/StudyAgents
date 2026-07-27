@@ -18,12 +18,20 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 needs_db = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 
 
-def _login(client, username: str, password: str) -> None:
+def _login(client, username: str, password: str) -> str:
+    """登录并返回 CSRF token。"""
     import apps.api.services.auth as svc
     svc._rate_store.clear()
     r = client.post("/api/auth/login", json={"username": username, "password": password})
     assert r.status_code == 200, f"Login failed ({username}): {r.status_code} {r.text[:200]}"
     client.cookies = r.cookies
+    return r.json()["csrf_token"]
+
+
+def _admin_headers(client) -> dict:
+    """获取管理员认证 headers（含 CSRF）。"""
+    token = _login(client, "admin", "test-pass-123")
+    return {"X-CSRF-Token": token}
 
 
 @pytest.fixture(autouse=True)
@@ -98,10 +106,10 @@ def test_member_retry_403(client) -> None:
 
 @needs_db
 def test_admin_upload_success(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     resp = client.post("/api/documents", files={
         "file": ("lecture.pdf", io.BytesIO(b"%PDF-1.4 valid" * 200), "application/pdf"),
-    })
+    }, headers=h)
     assert resp.status_code == 201
     data = resp.json()
     assert data["state"] == "accepted"
@@ -113,10 +121,10 @@ def test_admin_upload_success(client) -> None:
 
 @needs_db
 def test_admin_upload_invalid_extension_415(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     resp = client.post("/api/documents", files={
         "file": ("virus.exe", io.BytesIO(b"x"), "application/octet-stream"),
-    })
+    }, headers=h)
     assert resp.status_code == 415
 
 
@@ -136,11 +144,11 @@ def test_admin_list_documents(client) -> None:
 
 @needs_db
 def test_admin_get_document_detail(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     # Upload first
     up = client.post("/api/documents", files={
         "file": ("notes.pdf", io.BytesIO(b"%PDF-1.4 content" * 300), "application/pdf"),
-    })
+    }, headers=h)
     assert up.status_code == 201
     doc_id = up.json()["document"]["id"]
     resp = client.get(f"/api/documents/{doc_id}")
@@ -163,13 +171,13 @@ def test_admin_get_nonexistent_document_404(client) -> None:
 
 @needs_db
 def test_admin_delete_document(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     up = client.post("/api/documents", files={
         "file": ("tmp.pdf", io.BytesIO(b"%PDF-1.4 delete" * 200), "application/pdf"),
-    })
+    }, headers=h)
     assert up.status_code == 201
     doc_id = up.json()["document"]["id"]
-    resp = client.delete(f"/api/documents/{doc_id}")
+    resp = client.delete(f"/api/documents/{doc_id}", headers=h)
     assert resp.status_code == 200
     assert resp.json()["accepted"] is True
 
@@ -180,10 +188,10 @@ def test_admin_delete_document(client) -> None:
 
 @needs_db
 def test_admin_get_ingestion_job(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     up = client.post("/api/documents", files={
         "file": ("jobtest.pdf", io.BytesIO(b"%PDF-1.4 job" * 200), "application/pdf"),
-    })
+    }, headers=h)
     assert up.status_code == 201
     job_id = up.json()["ingestion_job"]["id"]
     resp = client.get(f"/api/ingestion-jobs/{job_id}")
@@ -193,10 +201,10 @@ def test_admin_get_ingestion_job(client) -> None:
 
 @needs_db
 def test_admin_retry_failed_job(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     up = client.post("/api/documents", files={
         "file": ("retry.pdf", io.BytesIO(b"%PDF-1.4 retry" * 200), "application/pdf"),
-    })
+    }, headers=h)
     assert up.status_code == 201
     job_id = up.json()["ingestion_job"]["id"]
     # 手动设置为 failed_retryable 以便测试 retry
@@ -212,17 +220,17 @@ def test_admin_retry_failed_job(client) -> None:
     import asyncio
     asyncio.run(_set_failed())
     # 重试
-    resp = client.post(f"/api/ingestion-jobs/{job_id}/retry")
+    resp = client.post(f"/api/ingestion-jobs/{job_id}/retry", headers=h)
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
 
 
 @needs_db
 def test_admin_retry_non_retryable_rejected(client) -> None:
-    _login(client, "admin", "test-pass-123")
+    h = _admin_headers(client)
     up = client.post("/api/documents", files={
         "file": ("noretry.pdf", io.BytesIO(b"%PDF-1.4 no" * 200), "application/pdf"),
-    })
+    }, headers=h)
     assert up.status_code == 201
     job_id = up.json()["ingestion_job"]["id"]
     # succeeded 不可重试
@@ -237,5 +245,5 @@ def test_admin_retry_non_retryable_rejected(client) -> None:
             await db.commit()
     import asyncio
     asyncio.run(_set_succeeded())
-    resp = client.post(f"/api/ingestion-jobs/{job_id}/retry")
+    resp = client.post(f"/api/ingestion-jobs/{job_id}/retry", headers=h)
     assert resp.status_code == 422
