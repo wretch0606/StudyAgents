@@ -444,19 +444,34 @@ class AgentRunnerService:
         }
 
     async def recover_stale_runs(self, session: AsyncSession) -> int:
-        """恢复崩溃后残留的 running 状态任务。
+        """恢复崩溃后残留的 running 状态任务，并重新调度执行。
 
-        扫描 agent_runs 表中 status='running' 的行，
-        将它们重置为 queued 以便重新调度。
+        1. 扫描 agent_runs 中 status='running' 的行
+        2. 将它们重置为 queued（保留 last_successful_node/checkpoint_ref）
+        3. 对每个恢复的 run 创建后台任务，传递恢复参数
         """
-        from sqlalchemy import update
+        from sqlalchemy import select
 
         from apps.api.db.models.agent_run import AgentRun as AgentRunModel
 
-        now = datetime.now(UTC).replace(tzinfo=None)
+        # Step 1: 查找所有 stale running runs
         result = await session.execute(
+            select(AgentRunModel).where(AgentRunModel.status == RUNNING),
+        )
+        stale_runs = list(result.scalars().all())
+
+        if not stale_runs:
+            return 0
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        recovered_ids = [r.id for r in stale_runs]
+
+        # Step 2: 批量更新为 queued
+        from sqlalchemy import update
+
+        await session.execute(
             update(AgentRunModel)
-            .where(AgentRunModel.status == RUNNING)
+            .where(AgentRunModel.id.in_(recovered_ids))
             .values(
                 status=QUEUED,
                 error_code="WORKER_RECOVERED",
@@ -465,7 +480,24 @@ class AgentRunnerService:
             ),
         )
         await session.commit()
-        return result.rowcount
+
+        # Step 3: 对每个恢复的 run 创建后台任务
+        for run in stale_runs:
+            task = asyncio.create_task(
+                self._execute_run(
+                    run_id=str(run.id),
+                    user_id=str(run.user_id),
+                    session_id=None,
+                    trace_id=run.trace_id or f"trace-{_uuid.uuid4().hex[:16]}",
+                    user_input="[recovered]",
+                    mode=run.mode,
+                    last_successful_node=run.last_successful_node,
+                    checkpoint_ref=run.checkpoint_ref,
+                ),
+            )
+            self._running[str(run.id)] = task
+
+        return len(stale_runs)
 
     # ---- Internal ----
 
@@ -478,6 +510,8 @@ class AgentRunnerService:
         trace_id: str,
         user_input: str,
         mode: str,
+        last_successful_node: str | None = None,
+        checkpoint_ref: str | None = None,
     ) -> None:
         """后台执行单个 Agent Run（asyncio.Task 入口）。"""
         from apps.api.db.session import _get_sessionmaker
@@ -492,7 +526,7 @@ class AgentRunnerService:
                     started_at=datetime.now(UTC).replace(tzinfo=None),
                 )
 
-                # 调用 C 的 runner
+                # 调用 C 的 runner（传递恢复参数）
                 result = await self._runner.run(
                     run_id=run_id,
                     trace_id=trace_id,
@@ -500,6 +534,8 @@ class AgentRunnerService:
                     mode=mode,
                     model_gateway=self._gateway,
                     event_sink=self._event_sink,
+                    last_successful_node=last_successful_node,
+                    checkpoint_ref=checkpoint_ref,
                 )
 
                 if result.status == "succeeded":

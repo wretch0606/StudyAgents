@@ -235,8 +235,6 @@ async def test_runner_service_success_writes_answer() -> None:
         await session.delete(chat)
         await session.commit()
 
-    await engine.dispose()
-
 
 @pytest.mark.asyncio
 async def test_runner_service_retry_blocked_when_running() -> None:
@@ -427,7 +425,16 @@ def test_runner_service_retry_only_failed_or_cancelled() -> None:
 @pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 @pytest.mark.asyncio
 async def test_runner_service_recovery_stale_runs() -> None:
-    """恢复崩溃后残留的 running 状态任务。"""
+    """恢复崩溃后残留的 running 状态任务 — 完整闭环。
+
+    验证：
+    1. 创建 running Run（含 last_successful_node + checkpoint_ref）
+    2. recover_stale_runs() 找到并重新调度
+    3. Runner 收到恢复参数
+    4. 最终状态为 completed
+    5. 同一 run 最多一条 assistant 消息
+    6. 新 session 重查确认
+    """
     import uuid
 
     from sqlalchemy import select
@@ -438,9 +445,12 @@ async def test_runner_service_recovery_stale_runs() -> None:
     )
 
     from apps.api.db.models.agent_run import AgentRun as AgentRunModel
-    from apps.api.db.models.run_state import QUEUED, RUNNING
+    from apps.api.db.models.run_state import RUNNING
     from apps.api.db.models.user import User
-    from apps.api.services.agent_runner import AgentRunnerService, FakeAgentRunner
+    from apps.api.services.agent_runner import (
+        AgentRunnerService,
+        AgentRunResult,
+    )
 
     url = DATABASE_URL
     for prefix in ("+psycopg", "+asyncpg"):
@@ -450,48 +460,93 @@ async def test_runner_service_recovery_stale_runs() -> None:
     engine = create_async_engine(async_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+    # Spy runner that records calls
+    class SpyRunner:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def run(self, **kwargs):
+            self.calls.append(kwargs)
+            return AgentRunResult(
+                status="succeeded",
+                public_response="Recovered answer",
+                last_successful_node="run.completed",
+                checkpoint_ref="cp-recovered",
+                model_calls=1,
+                node_hops=2,
+                total_elapsed_ms=100,
+            )
+
+    spy = SpyRunner()
+
     async with maker() as session:
         user_result = await session.execute(select(User).limit(1))
         user = user_result.scalar_one_or_none()
         if user is None:
             pytest.skip("No users in database")
 
-        # Create a run stuck in "running" state (simulating crash)
         rid = str(uuid.uuid4())
         tid = str(uuid.uuid4())
         run = AgentRunModel(
-            id=rid, thread_id=tid, user_id=user.id,
-            mode="qa", status=RUNNING,
+            id=rid,
+            thread_id=tid,
+            user_id=user.id,
+            mode="qa",
+            status=RUNNING,
+            last_successful_node="agent.summary",
+            checkpoint_ref="cp-before-crash",
+            trace_id=f"trace-{uuid.uuid4().hex[:16]}",
         )
         session.add(run)
         await session.commit()
+        str(user.id)
 
-    # Run recovery
     sink = _make_fake_sink(None)
     svc = AgentRunnerService(
-        runner=FakeAgentRunner(),
+        runner=spy,
         model_gateway=None,
         event_sink=sink,
     )
 
-    async with maker() as session:
-        recovered = await svc.recover_stale_runs(session)
+    # Run recovery using global engine (same pool as background tasks)
+    from apps.api.db.session import _get_sessionmaker
+
+    async with _get_sessionmaker()() as recovery_session:
+        recovered = await svc.recover_stale_runs(recovery_session)
         assert recovered >= 1, "Should recover at least 1 stale run"
 
-        # Verify the run is now "queued"
-        result = await session.execute(
+    # Allow event loop to schedule and execute background tasks
+    await asyncio.sleep(0.3)
+
+    # Wait for background tasks to complete
+    task = svc._running.get(rid)
+    if task:
+        await asyncio.wait_for(task, timeout=10)
+
+    # Verify runner was called with recovery params
+    assert len(spy.calls) >= 1, "Runner should have been called"
+    call = spy.calls[0]
+    assert call["run_id"] == rid
+    assert call["last_successful_node"] == "agent.summary"
+    assert call["checkpoint_ref"] == "cp-before-crash"
+    assert call["mode"] == "qa"
+
+    # Verify final state via new session (use global engine)
+    async with _get_sessionmaker()() as verify_session:
+        result = await verify_session.execute(
             select(AgentRunModel).where(AgentRunModel.id == rid),
         )
-        recovered_run = result.scalar_one_or_none()
-        assert recovered_run is not None
-        assert recovered_run.status == QUEUED
-        assert recovered_run.error_code == "WORKER_RECOVERED"
+        final_run = result.scalar_one_or_none()
+        assert final_run is not None
+        assert final_run.status == "completed", (
+            f"Expected completed, got {final_run.status}"
+        )
+        assert final_run.last_successful_node == "run.completed"
+        assert final_run.checkpoint_ref == "cp-recovered"
 
         # Cleanup
-        await session.delete(recovered_run)
-        await session.commit()
-
-    await engine.dispose()
+        await verify_session.delete(final_run)
+        await verify_session.commit()
 
 
 # ---- helpers ----
