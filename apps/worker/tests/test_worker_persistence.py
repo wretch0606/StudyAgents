@@ -123,9 +123,9 @@ async def test_worker_marks_failed_on_handler_exception() -> None:
     async with session_context() as db:
         r = await db.execute(select(IngestionJob).where(IngestionJob.id == job_id))
         job = r.scalar_one()
-        assert job.status == "failed"
-        assert job.error is not None
-        assert "HANDLER_EXCEPTION" in (job.error or "")
+        assert job.status == "failed_retryable"
+        assert job.error_summary is not None
+        assert "simulated failure" in (job.error_summary or "")
         assert job.updated_at is not None
 
     await _cleanup(doc_id, job_id)
@@ -152,8 +152,8 @@ async def test_worker_marks_failed_on_unregistered_handler() -> None:
     async with session_context() as db:
         r = await db.execute(select(IngestionJob).where(IngestionJob.id == job_id))
         job = r.scalar_one()
-        assert job.status == "failed"
-        assert job.error is not None
-        assert "handler_not_configured" in (job.error or "")
+        assert job.status == "failed_retryable"
+        assert job.error_summary is not None
+        assert "handler_not_configured" in (job.error_summary or "")
 
     await _cleanup(doc_id, job_id)

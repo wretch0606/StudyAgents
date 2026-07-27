@@ -117,56 +117,84 @@ class Worker:
         logger.info("run loop exited")
 
     async def _process_pending_jobs(self) -> None:
-        """查询 pending 状态的 ingestion_jobs，逐个处理并持久化结果。
+        """使用租约获取 pending 任务，通过 B 适配器执行并持久化。
 
-        Issue #8 最小实现：不包含租约/重试/恢复/死信（→ Issue #11）。
+        Issue #11：SELECT FOR UPDATE SKIP LOCKED + 重试 + 恢复。
         """
-        from datetime import UTC, datetime
-
-        from sqlalchemy import select
-
-        from apps.api.db.models.ingestion_job import IngestionJob
         from apps.api.db.session import session_context
+        from apps.worker.services.job_service import (
+            claim_next_job,
+            complete_job,
+            fail_job,
+            recover_stale_jobs,
+            update_progress,
+        )
 
         try:
             async with session_context() as db_session:
-                result = await db_session.execute(
-                    select(IngestionJob)
-                    .where(IngestionJob.status == "pending")
-                    .limit(10)
+                # 恢复过期任务
+                recovered = await recover_stale_jobs(db_session)
+                if recovered:
+                    logger.info("recovered %d stale jobs", recovered)
+                await db_session.commit()
+
+            async with session_context() as db_session:
+                # 领取任务（带锁）
+                job = await claim_next_job(db_session)
+                if job is None:
+                    await db_session.commit()
+                    return
+
+                logger.info(
+                    "claimed job %s doc=%s attempt=%d",
+                    job.id, job.document_id, job.attempts,
                 )
-                jobs = result.scalars().all()
+                await db_session.commit()
 
-                for job in jobs:
-                    # 更新为 running
-                    job.status = "running"
-                    job.attempts += 1
-                    job.updated_at = datetime.now(UTC).replace(tzinfo=None)
-                    await db_session.flush()
-
-                    # 尝试执行
-                    task = WorkerTask(
-                        task_id=str(job.id),
-                        task_type=job.stage,
-                        payload={"document_id": str(job.document_id)},
+            # 执行任务（独立事务，避免长事务）
+            async with session_context() as db_session:
+                # 重新加载 job
+                from apps.api.db.models.ingestion_job import IngestionJob
+                result = await db_session.execute(
+                    __import__("sqlalchemy").select(IngestionJob).where(
+                        IngestionJob.id == job.id
                     )
-                    try:
+                )
+                job = result.scalar_one()
+
+                try:
+                    # 通过 B 适配器执行阶段
+                    if self.registry.list_registered():
+                        task = WorkerTask(
+                            task_id=str(job.id),
+                            task_type=job.stage,
+                            payload={"document_id": str(job.document_id)},
+                        )
                         worker_result = await self.execute_task(task)
                         if worker_result.success:
-                            job.status = "succeeded"
-                            job.progress = 100.0
+                            await complete_job(db_session, job)
                         else:
-                            job.status = "failed"
-                            job.error = (
-                                f"{worker_result.error_code}: {worker_result.error_message}"
+                            await fail_job(
+                                db_session, job,
+                                RuntimeError(worker_result.error_message or "unknown"),
                             )
-                    except HandlerNotConfiguredError as exc:
-                        job.status = "failed"
-                        job.error = f"handler_not_configured: {exc.task_type}"
+                    else:
+                        # 无处理器：标记为可重试（等待 B 接入）
+                        await update_progress(
+                            db_session, job, job.stage, job.progress,
+                            error_code="NO_HANDLER",
+                            error_summary="handler_not_configured",
+                        )
+                        await fail_job(
+                            db_session, job,
+                            RuntimeError("handler_not_configured"),
+                            retryable=True,
+                        )
+                except Exception as exc:
+                    await fail_job(db_session, job, exc)
+                    logger.exception("job %s failed", job.id)
 
-                    job.updated_at = datetime.now(UTC).replace(tzinfo=None)
-                    await db_session.flush()
-                    await db_session.commit()
+                await db_session.commit()
 
         except Exception:
             logger.exception("failed to process pending jobs")
@@ -191,13 +219,13 @@ class Worker:
                     task.task_id, result.error_code, result.error_message,
                 )
             return result
-        except Exception:
+        except Exception as exc:
             logger.exception("task exception: id=%s", task.task_id)
             return WorkerResult(
                 task_id=task.task_id,
                 success=False,
                 error_code="HANDLER_EXCEPTION",
-                error_message="处理器执行时发生未预期异常。",
+                error_message=str(exc)[:500],
             )
 
     async def stop(self) -> None:
