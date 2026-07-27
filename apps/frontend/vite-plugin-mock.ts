@@ -115,6 +115,10 @@ export function mockPlugin(): Plugin {
           }
         }
       }
+      // 额外预加载 admin 登录响应（由 login handler 内部引用，不在 MOCK_ROUTES 中）
+      if (!mockCache['auth/login-admin.json']) {
+        mockCache['auth/login-admin.json'] = loadMock('auth/login-admin.json')
+      }
 
       // ----- 创建 Mock 中间件 -----
       const mockMiddleware = (
@@ -136,7 +140,7 @@ export function mockPlugin(): Plugin {
         }
 
         // Mock 路由 → 异步处理（需要解析 POST body）
-        handleMockRequest(req, res, mockCache[mockFile])
+        handleMockRequest(req, res, mockCache[mockFile], mockCache)
       }
 
       // ----- 注入到 connect 中间件栈的最前端 -----
@@ -158,6 +162,7 @@ async function handleMockRequest(
   req: IncomingMessage,
   res: ServerResponse,
   mockData: object,
+  mockCache: Record<string, object>,
 ): Promise<void> {
   const method = (req.method ?? 'GET').toUpperCase()
 
@@ -166,22 +171,40 @@ async function handleMockRequest(
       // ----- POST: 解析 body 并可做简单校验 -----
       const body = await parseBody(req)
 
-      // 登录接口：校验非空（Mock 模式下接受任意非空凭证）
-      if (
-        req.url?.startsWith('/api/auth/login') &&
-        (!(body as Record<string, unknown>).username ||
-          !(body as Record<string, unknown>).password)
-      ) {
-        return sendJson(
-          res,
-          {
-            code: 'VALIDATION_ERROR',
-            message: '用户名和密码不能为空',
-            retryable: false,
-            trace_id: 'mock-trace-validation',
-          },
-          422,
-        )
+      // 登录接口：校验非空 + 管理员凭据分流
+      if (req.url?.startsWith('/api/auth/login')) {
+        const creds = body as Record<string, unknown>
+        if (!creds.username || !creds.password) {
+          return sendJson(
+            res,
+            {
+              code: 'VALIDATION_ERROR',
+              message: '用户名和密码不能为空',
+              retryable: false,
+              trace_id: 'mock-trace-validation',
+            },
+            422,
+          )
+        }
+
+        // 管理员凭据 → 返回 admin 角色响应
+        if (creds.username === 'admin' && creds.password === 'admin123') {
+          return sendJson(res, mockCache['auth/login-admin.json'])
+        }
+
+        // 错误密码（仅 admin 用户校验密码，其余接受任意密码）
+        if (creds.username === 'admin' && creds.password !== 'admin123') {
+          return sendJson(
+            res,
+            {
+              code: 'AUTH_INVALID_CREDENTIALS',
+              message: '用户名或密码错误',
+              retryable: false,
+              trace_id: 'mock-trace-auth-failure',
+            },
+            401,
+          )
+        }
       }
 
       sendJson(res, mockData)

@@ -4,32 +4,45 @@
 //
 // 提供顶部导航栏 + <router-view> 出口。
 // 路由逻辑由 src/router/index.ts 的 beforeEach 守卫控制。
+//
+// 认证状态通过 useUserStore 管理（Bearer Token + localStorage），
+// 页面刷新后同步恢复，无需等待异步 init()。
 // ============================================================
 
-import { ref, computed } from 'vue'
+import { onMounted, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useUserStore } from './stores/useUserStore'
+import { setLoginRedirectHandler } from './utils/request'
 
 const router = useRouter()
 const route = useRoute()
+const userStore = useUserStore()
 
-/** 当前登录角色（响应式同步自 localStorage） */
-const userRole = ref<string | null>(localStorage.getItem('userRole'))
+// ---- 应用启动：会话恢复 + 注册 401 重定向 ----
+
+onMounted(() => {
+  // 从 localStorage 恢复 Token → 调用后端验证 → 写入 user info
+  userStore.init()
+
+  // 注册 401 会话过期回调：清除状态并跳转登录页
+  setLoginRedirectHandler(() => {
+    userStore.logout()
+    router.push('/login')
+  })
+})
+
+// ---- 响应式状态 ----
 
 /** 是否在登录页（登录页不显示导航栏） */
 const isLoginPage = computed(() => route.path === '/login')
 
-/**
- * 每次路由跳转后同步 userRole 与 localStorage，
- * 保证登录/退出切换时导航栏状态与角色权限即时更新。
- */
-router.afterEach(() => {
-  userRole.value = localStorage.getItem('userRole')
-})
+/** 当前用户角色（响应式，来自 Store） */
+const userRole = computed(() => userStore.user?.role ?? null)
 
-/** 退出登录 */
+// ---- 退出登录 ----
+
 function handleLogout() {
-  localStorage.removeItem('userRole')
-  userRole.value = null
+  userStore.logout()
   router.replace('/login')
 }
 </script>
