@@ -24,17 +24,22 @@ async def create_run(
     return run
 
 
-async def get_run(session: AsyncSession, run_id: str) -> AgentRunModel | None:
+async def get_run(
+    session: AsyncSession, run_id: str, *, user_id: str,
+) -> AgentRunModel | None:
     result = await session.execute(
-        select(AgentRunModel).where(AgentRunModel.id == run_id)
+        select(AgentRunModel).where(
+            AgentRunModel.id == run_id,
+            AgentRunModel.user_id == user_id,
+        ),
     )
     return result.scalar_one_or_none()
 
 
 async def update_run_status(
-    session: AsyncSession, run_id: str, status: str, **kwargs,
+    session: AsyncSession, run_id: str, status: str, *, user_id: str, **kwargs,
 ) -> None:
-    run = await get_run(session, run_id)
+    run = await get_run(session, run_id, user_id=user_id)
     if run is None:
         return
     run.status = status
@@ -87,9 +92,15 @@ async def insert_event(
 
 
 async def get_events_since(
-    session: AsyncSession, run_id: str, since_seq: int = -1,
+    session: AsyncSession, run_id: str, *, user_id: str, since_seq: int = -1,
 ) -> list[AgentEventModel]:
-    """获取指定 run 中 sequence_no > since_seq 的事件（用于 SSE 补发）。"""
+    """获取指定 run 中 sequence_no > since_seq 的事件（用于 SSE 补发）。
+
+    Owner isolation: 先通过 get_run 验证属主，再查询事件。
+    """
+    run = await get_run(session, run_id, user_id=user_id)
+    if run is None:
+        return []
     result = await session.execute(
         select(AgentEventModel)
         .where(

@@ -33,7 +33,7 @@ async def get_agent_run(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> AgentRunSummary:
-    run = await run_repo.get_run(session, run_id)
+    run = await run_repo.get_run(session, run_id, user_id=user_id)
     if run is None:
         raise ApiError("RESOURCE_NOT_FOUND", "Run 不存在。", status_code=404, retryable=False)
     _check_owner(run, user_id)
@@ -57,7 +57,7 @@ async def get_agent_run_events(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    run = await run_repo.get_run(session, run_id)
+    run = await run_repo.get_run(session, run_id, user_id=user_id)
     if run is None:
         raise ApiError("RESOURCE_NOT_FOUND", "Run 不存在。", status_code=404, retryable=False)
     _check_owner(run, user_id)
@@ -73,7 +73,7 @@ async def retry_agent_run(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> RetryAgentRunResponse:
-    run = await run_repo.get_run(session, run_id)
+    run = await run_repo.get_run(session, run_id, user_id=user_id)
     if run is None:
         raise ApiError("RESOURCE_NOT_FOUND", "Run 不存在。", status_code=404, retryable=False)
     _check_owner(run, user_id)

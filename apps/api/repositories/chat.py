@@ -29,13 +29,15 @@ async def create_chat_session(
 
 
 async def get_chat_session(
-    session: AsyncSession, session_id: str, *, user_id: str | None = None,
+    session: AsyncSession, session_id: str, *, user_id: str,
 ) -> ChatSessionModel | None:
-    """Get a chat session, optionally scoped to user_id for ownership isolation."""
-    stmt = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
-    if user_id is not None:
-        stmt = stmt.where(ChatSessionModel.user_id == user_id)
-    result = await session.execute(stmt)
+    """Get a chat session, scoped to user_id for mandatory ownership isolation."""
+    result = await session.execute(
+        select(ChatSessionModel).where(
+            ChatSessionModel.id == session_id,
+            ChatSessionModel.user_id == user_id,
+        ),
+    )
     return result.scalar_one_or_none()
 
 
@@ -58,10 +60,10 @@ async def list_chat_sessions(
 
 
 async def update_chat_session(
-    session: AsyncSession, session_id: str, **kwargs,
+    session: AsyncSession, session_id: str, *, user_id: str, **kwargs,
 ) -> None:
-    """Update chat session fields (e.g. title)."""
-    chat = await get_chat_session(session, session_id)
+    """Update chat session fields (e.g. title). Owner isolation enforced."""
+    chat = await get_chat_session(session, session_id, user_id=user_id)
     if chat is None:
         return
     for key, value in kwargs.items():
@@ -116,15 +118,14 @@ async def get_messages(
     session: AsyncSession,
     session_id: str,
     *,
-    user_id: str | None = None,
+    user_id: str,
     since_seq: int = -1,
 ) -> list[ChatMessageModel]:
-    """Get messages in a session. Optionally filter by user_id and sequence offset."""
+    """Get messages in a session, scoped to user_id for mandatory ownership isolation."""
     stmt = select(ChatMessageModel).where(
         ChatMessageModel.session_id == session_id,
+        ChatMessageModel.user_id == user_id,
     )
-    if user_id is not None:
-        stmt = stmt.where(ChatMessageModel.user_id == user_id)
     if since_seq >= 0:
         stmt = stmt.where(ChatMessageModel.sequence_no > since_seq)
     stmt = stmt.order_by(ChatMessageModel.sequence_no)
@@ -133,13 +134,14 @@ async def get_messages(
 
 
 async def get_assistant_message(
-    session: AsyncSession, run_id: str,
+    session: AsyncSession, run_id: str, *, user_id: str,
 ) -> ChatMessageModel | None:
-    """Get the assistant message for a given run (idempotency check)."""
+    """Get the assistant message for a given run (idempotency check, owner-isolated)."""
     result = await session.execute(
         select(ChatMessageModel).where(
             ChatMessageModel.run_id == run_id,
             ChatMessageModel.role == "assistant",
+            ChatMessageModel.user_id == user_id,
         ),
     )
     return result.scalar_one_or_none()
@@ -151,16 +153,19 @@ async def transition_run_status(
     session: AsyncSession,
     run_id: str,
     target_status: str,
+    *,
+    user_id: str,
     **kwargs,
 ) -> None:
     """Transition an AgentRun to a new status, validating the state machine.
 
     Requires current status from DB to validate before updating.
+    Owner isolation enforced via mandatory user_id.
     """
     from apps.api.repositories.agent_run import get_run, update_run_status  # noqa: PLC0415
 
-    run = await get_run(session, run_id)
+    run = await get_run(session, run_id, user_id=user_id)
     if run is None:
         raise ValueError(f"AgentRun not found: {run_id}")
     validate_transition(run.status, target_status)
-    await update_run_status(session, run_id, target_status, **kwargs)
+    await update_run_status(session, run_id, target_status, user_id=user_id, **kwargs)

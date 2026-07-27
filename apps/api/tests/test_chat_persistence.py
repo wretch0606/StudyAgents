@@ -109,6 +109,16 @@ def test_agent_runs_has_new_indexes() -> None:
         assert expected in indexed, f"agent_runs missing index on {expected}"
 
 
+def test_agent_events_unique_constraint() -> None:
+    """Verify agent_events has (run_id, sequence_no) unique constraint (Issue #8)."""
+    import apps.api.db.models  # noqa: F401
+    from apps.api.db.base import Base
+
+    table = Base.metadata.tables["agent_events"]
+    constraint_names = {c.name for c in table.constraints}
+    assert "uq_agent_events_run_seq" in constraint_names
+
+
 # ============================================================
 # 2. Migration tests (no DB needed)
 # ============================================================
