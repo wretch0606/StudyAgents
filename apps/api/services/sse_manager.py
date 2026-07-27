@@ -47,11 +47,19 @@ class SSEManager:
         for q in self._queues.get(run_id, []):
             await q.put(payload)
 
-    def mark_completed(self, run_id: str) -> None:
+    def mark_completed(self, run_id: str, *, event_type: str = "run.completed") -> None:
+        """标记 run 终止状态。event_type: 'run.completed' 或 'run.failed'。"""
         self._run_completed.add(run_id)
+        self._run_terminal_event = getattr(self, "_run_terminal_event", {})
+        self._run_terminal_event[run_id] = event_type
 
     def is_completed(self, run_id: str) -> bool:
         return run_id in self._run_completed
+
+    def _get_terminal_event_type(self, run_id: str) -> str:
+        """获取 run 的终止事件类型，默认为 run.completed。"""
+        terminal = getattr(self, "_run_terminal_event", {})
+        return terminal.get(run_id, "run.completed")
 
     async def sse_endpoint(
         self, run_id: str, request_headers: dict, *, user_id: str,
@@ -63,35 +71,37 @@ class SSEManager:
         queue = await self.connect(run_id)
 
         async def event_generator():
-            # 补发
+            # 总是从数据库读取历史事件（fresh connect: since_seq=-1；reconnect: Last-Event-ID）
             last_id = request_headers.get("last-event-id", "")
-            if last_id:
-                try:
-                    since = int(last_id)
-                    from apps.api.db.session import _get_sessionmaker
-                    from apps.api.repositories.agent_run import get_events_since
-                    async with _get_sessionmaker()() as session:
-                        events = await get_events_since(
-                            session, run_id, user_id=user_id, since_seq=since,
-                        )
-                        for evt in events:
-                            pub = _to_public(evt)
-                            msg = json.dumps(pub.model_dump(), ensure_ascii=False)
-                            yield f"id: {pub.sequence_no}\ndata: {msg}\n\n"
-                except Exception:
-                    pass
+            since = int(last_id) if last_id else -1
+            try:
+                from apps.api.db.session import _get_sessionmaker
+                from apps.api.repositories.agent_run import get_events_since
+                async with _get_sessionmaker()() as session:
+                    events = await get_events_since(
+                        session, run_id, user_id=user_id, since_seq=since,
+                    )
+                    for evt in events:
+                        pub = _to_public(evt)
+                        msg = json.dumps(pub.model_dump(), ensure_ascii=False)
+                        yield f"id: {pub.sequence_no}\ndata: {msg}\n\n"
+            except Exception:
+                logger.exception("SSE history replay failed for run_id=%s", run_id)
 
             # 心跳 + 事件推送
             try:
                 while True:
                     try:
-                        msg = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
+                        msg = await asyncio.wait_for(
+                            queue.get(), timeout=HEARTBEAT_INTERVAL,
+                        )
                         yield f"data: {msg}\n\n"
                     except TimeoutError:
                         yield ": heartbeat\n\n"
 
                     if self.is_completed(run_id) and queue.empty():
-                        yield "event: run.completed\ndata: {}\n\n"
+                        terminal_type = self._get_terminal_event_type(run_id)
+                        yield f"event: {terminal_type}\ndata: {{}}\n\n"
                         break
             except asyncio.CancelledError:
                 pass

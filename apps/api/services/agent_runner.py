@@ -626,6 +626,10 @@ class AgentRunnerService:
         )
         await session.commit()
 
+        # SSE 通知 — 失败终止
+        from apps.api.services.sse_manager import sse_manager
+        sse_manager.mark_completed(run_id, event_type="run.failed")
+
     async def _on_exception(
         self,
         session: AsyncSession,
@@ -647,6 +651,10 @@ class AgentRunnerService:
             completed_at=datetime.now(UTC).replace(tzinfo=None),
         )
         await session.commit()
+
+        # SSE 通知 — 异常终止
+        from apps.api.services.sse_manager import sse_manager
+        sse_manager.mark_completed(run_id, event_type="run.failed")
 
 
 # ============================================================
