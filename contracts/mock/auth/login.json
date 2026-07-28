@@ -1,5 +1,6 @@
 {
-  "$comment": "POST /api/auth/login — 登录成功响应，对应 api.ts LoginResponse",
+  "$comment": "POST /api/auth/login — 普通用户登录成功响应",
+  "token": "mock-jwt-token-member-xyz",
   "user": {
     "id": "user-001",
     "username": "demo",

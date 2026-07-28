@@ -1,0 +1,86 @@
+{
+  "$comment": "GET /api/chat/history — 对话历史初始化数据（含 Agent 步骤与溯源引用）",
+  "messages": [
+    {
+      "id": "m10001",
+      "role": "user",
+      "content": "TCP 拥塞控制中，若当前 cwnd = 24 MSS，ssthresh = 16 MSS，收到 3 个重复 ACK 后，cwnd 和 ssthresh 分别变为多少？",
+      "timestamp": "14:22",
+      "attachments": []
+    },
+    {
+      "id": "m10002",
+      "role": "assistant",
+      "content": "当收到 3 个重复 ACK 时，TCP 执行**快速重传**和**快速恢复**算法：\n\n1. **ssthresh** 设为当前 cwnd 的一半：`ssthresh = max(cwnd / 2, 2*MSS) = 12 MSS`\n2. **cwnd** 的处理分两步：\n   - 首先将 cwnd 减半：`cwnd = ssthresh = 12 MSS`\n   - 然后每收到一个重复 ACK，cwnd 增加 1 MSS（快速恢复阶段）\n3. 收到新数据的 ACK 后，cwnd = ssthresh = 12 MSS，进入**拥塞避免**阶段\n\n**最终答案**：cwnd = 12 MSS，ssthresh = 12 MSS。\n\n> 注意：如果是超时重传（RTO 超时），cwnd 会直接降到 1 MSS，而 ssthresh 同样设为 cwnd/2。",
+      "timestamp": "14:22",
+      "citationIds": ["S1", "S2"]
+    },
+    {
+      "id": "m10003",
+      "role": "user",
+      "content": "IP 子网划分：某公司有 4 个部门，分别需要 58、26、12、10 台主机，给定网络地址 192.168.10.0/24，请规划子网。",
+      "timestamp": "14:25"
+    },
+    {
+      "id": "m10004",
+      "role": "assistant",
+      "content": "对 192.168.10.0/24 进行**VLSM（可变长子网掩码）**划分：\n\n| 部门 | 需要主机 | 子网地址 | 子网掩码 | 可用范围 | 广播地址 |\n|------|---------|----------|----------|----------|----------|\n| A | 58 | 192.168.10.0 | /26 (255.255.255.192) | .1–.62 | .63 |\n| B | 26 | 192.168.10.64 | /27 (255.255.255.224) | .65–.94 | .95 |\n| C | 12 | 192.168.10.96 | /28 (255.255.255.240) | .97–.110 | .111 |\n| D | 10 | 192.168.10.112 | /28 (255.255.255.240) | .113–.126 | .127 |\n\n**计算要点**：\n- 58 台主机 → 需要 6 位主机位（2^6-2=62≥58）→ 子网掩码 /26\n- 26 台主机 → 需要 5 位主机位（2^5-2=30≥26）→ 子网掩码 /27\n- 按需分配，避免浪费地址空间",
+      "timestamp": "14:25",
+      "citationIds": ["S3"]
+    }
+  ],
+  "agent_steps": [
+    {
+      "agentRole": "coordinator",
+      "agentLabel": "🧠 Coordinator",
+      "status": "succeeded",
+      "summary": "协调 Agent 识别为计算机网络课程问题，路由至知识 Agent 进行资料检索",
+      "detail": "意图分类：计算机网络 > TCP 协议 > 拥塞控制\n置信度：0.97\n下游调度：Knowledge Agent → Evaluator Agent",
+      "durationMs": 120
+    },
+    {
+      "agentRole": "knowledge",
+      "agentLabel": "📚 Knowledge",
+      "status": "succeeded",
+      "summary": "知识 Agent 在课程资料库中检索到 3 条相关文档片段，证据充足可作答",
+      "detail": "检索范围：计算机网络.pdf 第 3 章（运输层）\n命中片段：TCP 拥塞控制 §3.2、快速重传 §3.3、子网划分 §4.1\n相似度评分：0.89 / 0.76 / 0.71",
+      "durationMs": 320
+    },
+    {
+      "agentRole": "questioner",
+      "agentLabel": "❓ Questioner",
+      "status": "idle",
+      "summary": "当前为自由问答模式，出题 Agent 未激活，处于待命状态",
+      "detail": "Questioner Agent 仅在专项训练模式（/training）下激活，负责基于课程知识点生成针对性练习题。",
+      "durationMs": 0
+    },
+    {
+      "agentRole": "evaluator",
+      "agentLabel": "⚖️ Evaluator",
+      "status": "succeeded",
+      "summary": "评测 Agent 完成答案组织与引用核验，全部结论均有关联来源",
+      "detail": "核验项：\n- 快速重传算法步骤 ✓（来源 S1, S2）\n- cwnd/ssthresh 计算 ✓（来源 S1）\n- 子网划分 VLSM 方法 ✓（来源 S3）\n证据充足度：高（3/3 结论可溯源）",
+      "durationMs": 180
+    }
+  ],
+  "source_refs": [
+    {
+      "refId": "S1",
+      "documentName": "计算机网络.pdf",
+      "pageNumber": 156,
+      "excerpt": "TCP 快速重传算法：当发送方连续收到 3 个重复 ACK 时，不等待重传定时器超时，立即重传丢失的报文段。同时执行快速恢复：ssthresh 设为 cwnd 的一半，cwnd 减半后每收到一个重复 ACK 增加 1 MSS。"
+    },
+    {
+      "refId": "S2",
+      "documentName": "计算机网络.pdf",
+      "pageNumber": 158,
+      "excerpt": "TCP 拥塞控制包含四个核心算法：慢启动（Slow Start）、拥塞避免（Congestion Avoidance）、快速重传（Fast Retransmit）和快速恢复（Fast Recovery）。超时重传与重复 ACK 触发的拥塞响应机制不同。"
+    },
+    {
+      "refId": "S3",
+      "documentName": "计算机网络.pdf",
+      "pageNumber": 212,
+      "excerpt": "VLSM（可变长子网掩码）允许在同一个主类网络中使用不同的子网掩码，从而更灵活地分配 IP 地址空间。划分子网时需预留网络地址和广播地址，可用主机数为 2^n - 2。"
+    }
+  ]
+}

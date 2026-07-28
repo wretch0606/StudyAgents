@@ -1,0 +1,5 @@
+{
+  "$comment": "POST /api/admin/knowledge/upload — 管理员资料库上传成功响应",
+  "file_id": "doc-mock-1706000000001",
+  "status": "processing"
+}
