@@ -8,14 +8,118 @@
 课程样例来源见 [docs/COURSE_MATERIALS.md](docs/COURSE_MATERIALS.md)，集成门结果统一记录在 [docs/ACCEPTANCE_TRACKER.md](docs/ACCEPTANCE_TRACKER.md)。
 第 6 天使用的 50 条评测基线、双人标注流程和指标工具见 [tests/evaluation/README.md](tests/evaluation/README.md)。
 
-## 核心能力
+## 快速启动（Docker Compose）
 
-- 导入数字 PDF，并为扫描 PDF 提供基础 OCR。
-- 回答附带文档名、页码或题号引用。
-- 证据不足时明确拒答，不使用模型通识补全课程事实。
-- 展示协调、知识、出题、评测讲解四类 Agent 的公开步骤摘要。
-- 支持专项训练、分步评分、讲解、错题本和掌握度更新。
-- 使用 Docker Compose 或统一脚本在答辩电脑复现。
+### 准备
+
+```bash
+# 1. 克隆仓库
+git clone <repo-url> && cd StudyAgents
+
+# 2. 创建环境文件
+cp .env.example .env
+# 编辑 .env，至少修改 SESSION_SECRET 和 INIT_DEFAULT_PASSWORD
+
+# 3. 确保 Docker 已安装并运行
+docker --version
+docker compose version
+```
+
+### 启动全部服务
+
+```bash
+# 构建镜像并启动（首次约 3-5 分钟）
+docker compose up -d --build
+
+# 查看服务状态
+docker compose ps
+```
+
+四个服务：`studyagents-postgres`、`studyagents-api`、`studyagents-worker`、`studyagents-frontend`
+
+### 数据库迁移
+
+```bash
+# 在隔离环境中执行迁移
+docker compose exec api alembic upgrade head
+
+# 验证迁移版本
+docker compose exec api alembic current
+```
+
+### 初始化账号
+
+```bash
+# 创建 1 admin + 4 member 共 5 个预置账号
+docker compose exec -e INIT_DEFAULT_PASSWORD=<your-password> api python scripts/init_users.py
+```
+
+默认账号：`admin`（管理员）、`member_a`、`member_b`、`member_c`、`member_d`（普通成员）
+
+### 健康检查
+
+```bash
+# API 健康检查
+curl http://localhost:8080/api/health/live
+
+# Worker 健康检查
+docker compose exec worker python -m apps.worker.main --check
+
+# 前端
+curl http://localhost:3000
+```
+
+### 访问
+
+| 服务 | 地址 |
+|------|------|
+| 前端 | http://localhost:3000 |
+| API | http://localhost:8080 |
+| API 文档（开发模式） | http://localhost:8080/api/docs |
+
+### 查看日志
+
+```bash
+# 所有服务
+docker compose logs -f
+
+# 单个服务
+docker compose logs -f api
+docker compose logs -f worker
+docker compose logs -f frontend
+```
+
+### 停止
+
+```bash
+# 停止所有服务，保留数据卷
+docker compose down
+
+# 停止并删除数据卷（重置数据库和文件）
+docker compose down -v
+```
+
+### 故障定位
+
+```bash
+# 数据库连接
+docker compose exec postgres pg_isready -U studyagents -d studyagents
+
+# API 日志中搜索错误
+docker compose logs api | grep -i error
+
+# 查看迁移历史
+docker compose exec api alembic history
+
+# 进入容器调试
+docker compose exec api bash
+docker compose exec worker bash
+```
+
+### 实时模式 vs 演示缓存
+
+- **实时模式**（默认）：设置 `.env` 中 `DEMO_CACHE_MODE=`（空）或直接不设置
+- **演示缓存模式**：设置 `.env` 中 `DEMO_CACHE_MODE=1`。前端和 API 会明确标记 `demo/cached`，不伪装为实时结果
 
 ## 技术栈
 
@@ -51,8 +155,6 @@
 | 第 6 天 | 评测与集中修复 | 核心指标达标或形成明确缺陷清单 |
 | 第 7 天 | 冻结与答辩 | 完整演示连续成功 3 次 |
 
-第 2、4、6 天结束前设置集成门；未通过时优先修复主链路，不新增功能。
-
 ## 仓库结构
 
 ```text
@@ -71,8 +173,6 @@
 └─ .github/              # Issue、PR 与协作模板
 ```
 
-首批代码进入后，再由各模块负责人补充对应目录的启动、测试和故障处理说明。
-
 ## 协作规则
 
 1. 第 1 天先合并 `contracts/` 中的公共契约和 Mock，再并行开发。
@@ -81,8 +181,6 @@
 4. Schema 变更必须同步更新契约、示例响应和前端 Mock。
 5. 当天可运行代码必须推送到远程仓库，禁止关键模块只留在个人电脑。
 6. 密钥、真实课程资料、个人数据、标准答案和私有评分点不得提交。
-
-完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 完成标准
 
