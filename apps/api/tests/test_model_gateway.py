@@ -112,15 +112,25 @@ async def test_openai_adapter_missing_config() -> None:
     """当配置缺失时抛出 MODEL_CONFIG_MISSING。"""
     from apps.api.services.model_gateway import OpenAIAdapter
 
-    adapter = OpenAIAdapter(base_url="", api_key="", model="")
-    with pytest.raises(ModelGatewayError) as exc_info:
-        await adapter.invoke_structured(
-            run_id="r3", trace_id="t3", agent="test",
-            prompt_version="v1", messages=[ModelMessage(role="user", content="x")],
-            output_schema=TestOutput,
-        )
-    assert exc_info.value.code == "MODEL_CONFIG_MISSING"
-    assert exc_info.value.retryable is False
+    # 隔离 .env 中的真实 API key：临时覆盖 settings 值
+    import apps.api.config as _cfg
+    old_base = _cfg.settings.model_base_url
+    old_key = _cfg.settings.model_api_key
+    _cfg.settings.model_base_url = ""
+    _cfg.settings.model_api_key = ""
+    try:
+        adapter = OpenAIAdapter(base_url="", api_key="", model="")
+        with pytest.raises(ModelGatewayError) as exc_info:
+            await adapter.invoke_structured(
+                run_id="r3", trace_id="t3", agent="test",
+                prompt_version="v1", messages=[ModelMessage(role="user", content="x")],
+                output_schema=TestOutput,
+            )
+        assert exc_info.value.code == "MODEL_CONFIG_MISSING"
+        assert exc_info.value.retryable is False
+    finally:
+        _cfg.settings.model_base_url = old_base
+        _cfg.settings.model_api_key = old_key
 
 
 # ---- 费用估算 ----

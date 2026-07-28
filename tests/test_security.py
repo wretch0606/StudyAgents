@@ -47,7 +47,7 @@ def test_login_rejects_invalid_json(client: TestClient) -> None:
 @_NEED_DB
 def test_unauthenticated_rejected(client: TestClient) -> None:
     """未认证不可访问受保护资源。"""
-    resp = client.get("/api/admin")
+    resp = client.get("/api/admin/health")
     assert resp.status_code in (401, 403)
 
 
@@ -58,7 +58,7 @@ def test_unauthenticated_rejected(client: TestClient) -> None:
 @_NEED_DB
 def test_member_cannot_access_admin(client: TestClient) -> None:
     """未认证无法访问管理员端点。"""
-    resp = client.get("/api/admin")
+    resp = client.get("/api/admin/health")
     assert resp.status_code in (401, 403)
 
 

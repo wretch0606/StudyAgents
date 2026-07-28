@@ -47,13 +47,14 @@ def report(name: str, values: list[float], unit: str = "ms") -> None:
 async def measure_api_health() -> list[float]:
     """测量 /api/health/live 响应时间。"""
     from fastapi.testclient import TestClient
+
     from apps.api.main import create_app
 
     client = TestClient(create_app())
     latencies: list[float] = []
     for i in range(WARMUP_ROUNDS + SAMPLE_ROUNDS):
         t0 = time.perf_counter()
-        resp = client.get("/api/health/live")
+        _resp = client.get("/api/health/live")
         elapsed = (time.perf_counter() - t0) * 1000
         if i >= WARMUP_ROUNDS:
             latencies.append(elapsed)
@@ -78,6 +79,7 @@ async def measure_grading_roundtrip() -> list[float]:
         async with _get_sessionmaker()() as s:
             if uid is None:
                 from sqlalchemy import select
+
                 from apps.api.db.models.user import User
                 u = (await s.execute(select(User).limit(1))).scalar_one_or_none()
                 if u is None:
@@ -139,7 +141,7 @@ async def main() -> None:
     print("StudyAgents 性能基线测量")
     print(f"环境: {HARDWARE}")
     print(f"预热: {WARMUP_ROUNDS} 轮, 采样: {SAMPLE_ROUNDS} 轮")
-    print(f"实时模式 (FakeAdapter, DEMO_CACHE_MODE=)")
+    print("实时模式 (FakeAdapter, DEMO_CACHE_MODE=)")
     print("=" * 60)
 
     # 1. API Health
