@@ -142,8 +142,18 @@ docker compose exec worker bash
 
 ### 实时模式 vs 演示缓存
 
-- **实时模式**（默认）：设置 `.env` 中 `DEMO_CACHE_MODE=`（空）或直接不设置
-- **演示缓存模式**：设置 `.env` 中 `DEMO_CACHE_MODE=1`。前端和 API 会明确标记 `demo/cached`，不伪装为实时结果
+**实时模式**（默认，`.env` 不设或留空 `DEMO_CACHE_MODE=`）：调用真实模型，成功响应自动填充缓存。
+
+**演示缓存模式**（`.env` 设 `DEMO_CACHE_MODE=1`）：从缓存返回，不调用模型。所有 API/SSE 响应标记 `_demo: true`。
+
+```bash
+# 1. 实时模式运行一次，填充缓存
+DEMO_CACHE_MODE= docker compose up -d
+# 2. 断网/无 API Key 时切换到缓存模式
+DEMO_CACHE_MODE=1 docker compose up -d
+```
+
+缓存键包含 agent、prompt 版本、输入消息和筛选条件。缓存仅存储公开 DTO，拒绝含私有答案/评分点/Prompt/密钥的内容。
 
 ## 技术栈
 
