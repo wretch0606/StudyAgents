@@ -259,10 +259,10 @@ async def test_retry_requires_auth(app) -> None:
 async def test_qa_p95_latency_under_2s(admin) -> None:
     """30 次 QA 启动，P95 延时 ≤ 2 秒。"""
     ac, token = admin
-    N = 30
+    sample_count = 30
     latencies: list[float] = []
 
-    for _ in range(N):
+    for _ in range(sample_count):
         sid = await _session(admin)
         start = time.monotonic()
         resp = await ac.post(
@@ -275,10 +275,11 @@ async def test_qa_p95_latency_under_2s(admin) -> None:
         latencies.append(elapsed)
 
     latencies.sort()
-    p50 = latencies[int(N * 0.50)]
-    p95 = latencies[int(N * 0.95)]
+    p50 = latencies[int(sample_count * 0.50)]
+    p95 = latencies[int(sample_count * 0.95)]
     p_max = latencies[-1]
 
     assert p95 <= 2.0, (
-        f"P95={p95:.3f}s exceeds 2s. P50={p50:.3f}s max={p_max:.3f}s N={N}"
+        f"P95={p95:.3f}s exceeds 2s. "
+        f"P50={p50:.3f}s max={p_max:.3f}s N={sample_count}"
     )

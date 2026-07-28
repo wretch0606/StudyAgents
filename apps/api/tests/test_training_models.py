@@ -121,14 +121,14 @@ def test_mastery_change_log_has_before_after() -> None:
 # 2. Migration tests
 # ============================================================
 
-def test_migration_005_importable() -> None:
-    """Migration 005 存在且可导入。"""
+def test_migration_006_importable() -> None:
+    """训练数据迁移位于聊天持久化迁移之后。"""
     from importlib import util as import_util
 
-    mf = _project_root / "alembic" / "versions" / "005_training_data_model.py"
+    mf = _project_root / "alembic" / "versions" / "006_training_data_model.py"
     assert mf.exists(), f"Migration file not found: {mf}"
 
-    spec = import_util.spec_from_file_location("migration_005", mf)
+    spec = import_util.spec_from_file_location("migration_006_training", mf)
     assert spec is not None
     mod = import_util.module_from_spec(spec)
     assert spec.loader is not None
@@ -136,8 +136,8 @@ def test_migration_005_importable() -> None:
 
     assert hasattr(mod, "upgrade")
     assert hasattr(mod, "downgrade")
-    assert mod.revision == "005"
-    assert mod.down_revision == "004"
+    assert mod.revision == "006"
+    assert mod.down_revision == "005"
 
 
 # ============================================================
@@ -145,7 +145,7 @@ def test_migration_005_importable() -> None:
 # ============================================================
 
 @pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
-def test_migration_005_upgrade_downgrade_cycle() -> None:
+def test_migration_006_upgrade_downgrade_cycle() -> None:
     """升级 → 降级 → 再升级 循环（使用 alembic CLI）。"""
     import subprocess
     import sys
@@ -166,11 +166,11 @@ def test_migration_005_upgrade_downgrade_cycle() -> None:
             f"alembic {' '.join(cmd)} failed:\n{result.stderr}"
         )
 
-    # Upgrade to 005
-    _run(["upgrade", "005"])
-    # Downgrade to 004
-    _run(["downgrade", "004"])
-    # Re-upgrade to 005
-    _run(["upgrade", "005"])
-    # Cleanup: downgrade to 004 (tables removed)
-    _run(["downgrade", "004"])
+    # Upgrade to 006
+    _run(["upgrade", "006"])
+    # Downgrade to 005
+    _run(["downgrade", "005"])
+    # Re-upgrade to 006
+    _run(["upgrade", "006"])
+    # Cleanup: downgrade to 005 (training tables removed)
+    _run(["downgrade", "005"])

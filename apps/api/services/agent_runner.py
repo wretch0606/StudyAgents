@@ -103,6 +103,21 @@ class AgentRunnerProtocol(Protocol):
         ...
 
 
+class _SessionBoundEventSink:
+    """将后台运行使用的数据库会话安全绑定到事件接收器。"""
+
+    def __init__(self, sink, db_session: AsyncSession) -> None:
+        self._sink = sink
+        self._last_db_session = db_session
+
+    async def emit(self, *, run_id: str, event: AgentEventDraft, db_session=None):
+        return await self._sink.emit(
+            run_id=run_id,
+            event=event,
+            db_session=self._last_db_session,
+        )
+
+
 # ============================================================
 # FakeAgentRunner — 测试用内存模拟
 # ============================================================
@@ -533,7 +548,7 @@ class AgentRunnerService:
                     user_input=user_input,
                     mode=mode,
                     model_gateway=self._gateway,
-                    event_sink=self._event_sink,
+                    event_sink=_SessionBoundEventSink(self._event_sink, session),
                     last_successful_node=last_successful_node,
                     checkpoint_ref=checkpoint_ref,
                 )

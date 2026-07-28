@@ -20,6 +20,37 @@ if str(_project_root) not in sys.path:
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
+@pytest.mark.asyncio
+async def test_session_bound_event_sink_uses_background_session() -> None:
+    """后台 Runner 发事件时始终使用当前运行事务的会话。"""
+    from apps.api.schemas.agent import AgentEventDraft
+    from apps.api.services.agent_runner import _SessionBoundEventSink
+
+    expected_session = object()
+    captured: dict = {}
+
+    class Sink:
+        async def emit(self, *, run_id, event, db_session):
+            captured.update({
+                "run_id": run_id,
+                "event": event,
+                "db_session": db_session,
+            })
+            return event
+
+    bound = _SessionBoundEventSink(Sink(), expected_session)  # type: ignore[arg-type]
+    event = AgentEventDraft(
+        agent="coordinator",
+        event_type="run.started",
+        status="running",
+        summary="started",
+    )
+    await bound.emit(run_id="run-1", event=event, db_session=None)
+
+    assert captured["run_id"] == "run-1"
+    assert captured["db_session"] is expected_session
+
+
 # ============================================================
 # 1. FakeAgentRunner 行为测试
 # ============================================================
