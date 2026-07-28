@@ -4,7 +4,7 @@
 一周冲刺版优先 PDF，JPG/PNG 仅保留骨架。
 """
 
-from worker.schemas import PageResult
+from apps.worker.schemas import PageResult
 
 
 class ImageParser:

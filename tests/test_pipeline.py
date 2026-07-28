@@ -10,8 +10,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from worker.ingestion.pipeline import IngestionPipeline
 from worker.ingestion.job_manager import JobManager
+from worker.ingestion.pipeline import IngestionPipeline
 from worker.schemas import IngestionJob, IngestionStage, IngestionStatus
 
 
@@ -51,6 +51,18 @@ class TestStageProgression:
         sample_job.stage = IngestionStage.EXTRACTING
         await pipeline.run(sample_job)
         assert sample_job.stage == IngestionStage.OCR
+
+    @pytest.mark.asyncio
+    async def test_extract_uses_uploaded_source_path(
+        self, pipeline, sample_job, tmp_path,
+    ):
+        source = tmp_path / "uploaded.pdf"
+        source.write_bytes(b"%PDF-1.4")
+        pipeline.parser.parse = MagicMock(return_value=[])
+
+        await pipeline.run(sample_job, source_path=source)
+
+        pipeline.parser.parse.assert_called_once_with(str(source.resolve()), "test-doc-001")
 
     @pytest.mark.asyncio
     async def test_full_chain_no_crash(self, pipeline, sample_job):

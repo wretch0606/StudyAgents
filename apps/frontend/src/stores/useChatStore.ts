@@ -4,7 +4,7 @@
 // 职责：
 //   1. 持有对话消息、Agent 工作流状态、文档溯源引用
 //   2. 通过 fetchHistory() 从 GET /api/chat/history 获取初始数据
-//      （dev 模式下由 vite-plugin-mock 拦截，production 由后端提供）
+//      （dev 模式下由本地 Vite Mock 插件拦截，production 由后端提供）
 //   3. 预留 addMessage / appendStreamChunk / finishStream 为
 //      SSE 流式输出接口
 // ============================================================
@@ -140,7 +140,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 从后端获取对话历史初始化 Store。
    *
-   * dev 模式下被 vite-plugin-mock（mock/chat.ts）拦截，
+   * dev 模式下被本地 vite-plugin-mock.ts 拦截，
    * production 模式下请求真实的 GET /api/chat/history。
    *
    * 幂等：多次调用不会重复加载（loaded === true 时直接返回）。
@@ -484,6 +484,10 @@ export const useChatStore = defineStore('chat', () => {
     total: number
     analysis: string
     highlights: string[]
+    /** 评测置信度 (0–1)，表示 Evaluator 对评分的把握 */
+    confidence: number
+    /** 评测引用的文档溯源卡片 */
+    sourceRefs: SourceRefDisplay[]
   }> {
     return new Promise((resolve) => {
       const traces = currentAgentTraces.value.length > 0
@@ -522,9 +526,35 @@ export const useChatStore = defineStore('chat', () => {
 
         isStreaming.value = false
 
+        // 填充 Mock 溯源引用（供评测报告展示）
+        sourceRefs.value = [
+          {
+            refId: 'S1',
+            documentName: '计算机网络·第3章 运输层',
+            pageNumber: 42,
+            excerpt:
+              '慢启动算法在连接建立或超时后启动，cwnd 初始值为 1 MSS，每收到一个 ACK，cwnd 加倍，呈指数增长，直至达到 ssthresh 阈值后切换至拥塞避免阶段。',
+          },
+          {
+            refId: 'S2',
+            documentName: 'TCP/IP 协议详解·卷1',
+            pageNumber: 287,
+            excerpt:
+              '拥塞避免阶段中，cwnd 每 RTT 线性增长 1 MSS，即 $cwnd_{new} = cwnd + MSS \\cdot (MSS / cwnd)$。当检测到丢包时，ssthresh 设为当前 cwnd 的一半。',
+          },
+          {
+            refId: 'S3',
+            documentName: '计算机网络·第3章 运输层',
+            pageNumber: 45,
+            excerpt:
+              'TCP Tahoe 版本在丢包后 cwnd 降为 1 MSS 重新慢启动；TCP Reno 引入了快速恢复机制，在收到 3 个重复 ACK 时 cwnd 减半而非重置。',
+          },
+        ]
+
         resolve({
           score: 85,
           total: 100,
+          confidence: 0.88,
           analysis:
             '你的回答正确阐述了慢启动（cwnd 指数增长）与拥塞避免（cwnd 线性增长）的核心区别。' +
             '慢启动阶段 cwnd 公式 $cwnd_{n+1} = 2 \\cdot cwnd_n$ 表意基本正确。' +
@@ -536,6 +566,29 @@ export const useChatStore = defineStore('chat', () => {
             '⚠️ 缺少 ssthresh 阈值的说明',
             '⚠️ 拥塞避免阶段线性增长公式未给出',
             '📝 建议补充 TCP Tahoe 与 Reno 版本差异',
+          ],
+          sourceRefs: [
+            {
+              refId: 'S1',
+              documentName: '计算机网络·第3章 运输层',
+              pageNumber: 42,
+              excerpt:
+                '慢启动算法在连接建立或超时后启动，cwnd 初始值为 1 MSS，每收到一个 ACK，cwnd 加倍，呈指数增长，直至达到 ssthresh 阈值后切换至拥塞避免阶段。',
+            },
+            {
+              refId: 'S2',
+              documentName: 'TCP/IP 协议详解·卷1',
+              pageNumber: 287,
+              excerpt:
+                '拥塞避免阶段中，cwnd 每 RTT 线性增长 1 MSS。当检测到丢包时，ssthresh 设为当前 cwnd 的一半。',
+            },
+            {
+              refId: 'S3',
+              documentName: '计算机网络·第3章 运输层',
+              pageNumber: 45,
+              excerpt:
+                'TCP Tahoe 版本在丢包后 cwnd 降为 1 MSS 重新慢启动；TCP Reno 引入了快速恢复机制。',
+            },
           ],
         })
       }, 1500)

@@ -12,7 +12,7 @@ from collections import defaultdict
 from math import log
 from typing import Optional
 
-from worker.schemas import RetrievalFilters
+from apps.worker.schemas import RetrievalFilters
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # 搜索结果类型（复用 vector_search）
 # ============================================================
 
-from worker.retrieval.vector_search import SearchHit
+from apps.worker.retrieval.vector_search import SearchHit
 
 
 # ============================================================

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/schemas/evaluation-annotation.schema.json",
+  "title": "StudyAgentsEvaluationAnnotation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "annotator_id", "judgments", "notes"],
+  "properties": {
+    "case_id": {"type": "string", "pattern": "^db-[0-9]{3}$"},
+    "annotator_id": {"type": "string", "minLength": 1},
+    "judgments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["answer", "citation", "refusal", "grading"],
+      "properties": {
+        "answer": {"enum": ["pass", "fail", "na"]},
+        "citation": {"enum": ["pass", "fail", "na"]},
+        "refusal": {"enum": ["pass", "fail", "na"]},
+        "grading": {"enum": ["pass", "fail", "na"]}
+      }
+    },
+    "notes": {"type": "string"}
+  }
+}

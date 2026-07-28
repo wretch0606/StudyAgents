@@ -4,7 +4,7 @@ DOCX 解析器（骨架）
 一周冲刺版优先 PDF，DOCX 仅保留骨架。
 """
 
-from worker.schemas import PageResult
+from apps.worker.schemas import PageResult
 
 
 class DOCXParser:

@@ -18,6 +18,7 @@ import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
 import { renderMixedHtml } from '../utils/katex-renderer'
+import { tokenizeMarkdownLine } from '../utils/markdown'
 
 // =========================================================
 // 聊天状态（Pinia Store）
@@ -26,7 +27,7 @@ import { renderMixedHtml } from '../utils/katex-renderer'
 const chatStore = useChatStore()
 const wrongBookStore = useWrongBookStore()
 // 仅提取 Home.vue 模板直接使用的状态（AgentDrawer 自行从 Store 读取）
-const { messages, isStreaming, attachments } = storeToRefs(chatStore)
+const { messages, isStreaming, attachments, agentSteps } = storeToRefs(chatStore)
 
 // ---- 页面挂载时发起网络请求获取对话历史 ----
 onMounted(() => {
@@ -84,11 +85,25 @@ const isTraining = ref(false)
 /** 选中的章节 */
 const selectedChapter = ref('')
 
+/** 选中的题型 */
+const selectedType = ref('')
+
+/** 选中的难度 */
+const selectedDifficulty = ref('')
+
 /** 选中的题目数量 */
 const selectedCount = ref('5')
 
-/** 开始训练：从章节选择切换至答题编辑器，初始化 Agent 轨迹 */
+/** 开始训练：收集配置参数 → 初始化 Agent 轨迹 → 切换至答题编辑器 */
 function startTraining() {
+  const config = {
+    chapter: selectedChapter.value,
+    type: selectedType.value,
+    difficulty: selectedDifficulty.value,
+    count: selectedCount.value,
+  }
+  console.log('[专项训练] 训练配置参数：', config)
+
   isTraining.value = true
   isSubmitted.value = false
   evaluationReport.value = null
@@ -102,11 +117,14 @@ function backToSelect() {
   isSubmitted.value = false
   evaluationReport.value = null
   trainingAnswer.value = ''
+  selectedType.value = ''
+  selectedDifficulty.value = ''
   chatStore.clearAgentTraces()
 }
 
 /** 答题区 v-model 绑定的用户输入 */
 const trainingAnswer = ref('')
+
 
 /** 是否已提交答案 */
 const isSubmitted = ref(false)
@@ -120,7 +138,33 @@ const evaluationReport = ref<{
   total: number
   analysis: string
   highlights: string[]
+  /** 评测置信度 (0–1) */
+  confidence: number
+  /** 评测引用的文档溯源卡片 */
+  sourceRefs: SourceRefDisplay[]
 } | null>(null)
+
+/** 得分率 (0–100)，用于圆环仪表 */
+const scorePercent = computed(() => {
+  if (!evaluationReport.value) return 0
+  return Math.round((evaluationReport.value.score / evaluationReport.value.total) * 100)
+})
+
+/** 得分等级（CSS class） */
+const scoreGrade = computed(() => {
+  const p = scorePercent.value
+  if (p >= 80) return 'grade-high'
+  if (p >= 60) return 'grade-mid'
+  return 'grade-low'
+})
+
+/** 得分圆环 SVG stroke-dash 参数 */
+const scoreRingDash = computed(() => {
+  const circumference = 2 * Math.PI * 54 // r=54
+  const p = scorePercent.value
+  const filled = (p / 100) * circumference
+  return { circumference, filled }
+})
 
 /** 章节中文标签（computed） */
 const chapterLabel = computed(() => {
@@ -131,6 +175,34 @@ const chapterLabel = computed(() => {
     default: return ''
   }
 })
+
+/** 章节 → 知识点映射（用于掌握度联动更新） */
+const CHAPTER_KP_MAP: Record<string, string[]> = {
+  ch3: ['kp1'],           // 运输层 → TCP 协议
+  ch4: ['kp2'],           // 网络层 → IP 与路由
+  ch5: [],                // 链路层暂无直接对应知识点（后续扩展）
+}
+
+/** 根据得分降低对应章节的知识点掌握度（模拟训练反馈闭环） */
+function applyMasteryDegradation(chapter: string, score: number, total: number) {
+  const kpIds = CHAPTER_KP_MAP[chapter]
+  if (!kpIds || kpIds.length === 0) return
+
+  const scoreRate = score / total
+  // 得分率越低，掌握度衰减越大（0.02–0.15）
+  const decay = Math.round((1 - scoreRate) * 0.15 * 100) / 100
+
+  for (const kpId of kpIds) {
+    const record = masteryRecords.value.find((r) => r.kpId === kpId)
+    if (record) {
+      record.mastery = Math.max(0, Math.round((record.mastery - decay) * 100) / 100)
+    }
+  }
+
+  // 重新计算总体掌握度
+  const sum = masteryRecords.value.reduce((acc, r) => acc + r.mastery, 0)
+  overallMastery.value = Math.round((sum / masteryRecords.value.length) * 100) / 100
+}
 
 /** 当前题目题干（纯文本，用于错题本存储） */
 const currentQuestionText = computed(() => {
@@ -160,6 +232,9 @@ async function submitAnswer() {
         analysis: report.analysis,
         highlights: report.highlights,
       })
+
+      // ---- 掌握度联动：低分 → 衰减对应知识点 ----
+      applyMasteryDegradation(selectedChapter.value, report.score, report.total)
     }
   } finally {
     isEvaluating.value = false
@@ -217,12 +292,14 @@ function wrongHighlightClass(item: string): string {
 function retryWrongQuestion(entry: WrongBookEntry) {
   selectedChapter.value = entry.chapter
   navMode.value = 'practice'
-  // 下一帧自动展开训练表单
+  // 重置表单状态，预填章节但保留题型/难度供用户选择
   nextTick(() => {
     isTraining.value = false
     isSubmitted.value = false
     evaluationReport.value = null
     trainingAnswer.value = ''
+    selectedType.value = ''
+    selectedDifficulty.value = ''
   })
 }
 
@@ -707,19 +784,37 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
             <path d="M46 40v8m-4-4h8" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" />
           </svg>
           <h3 class="practice-title">开始专项训练</h3>
-          <p class="practice-desc">选择章节和知识点，AI 将基于课程资料生成针对性练习题，完成后由 Evaluator Agent 分步评分并生成详细讲解。</p>
+          <p class="practice-desc">配置训练参数，AI 将基于课程资料生成针对性练习题，完成后由 Evaluator Agent 分步评分并生成详细讲解。</p>
           <div class="practice-config">
             <el-select v-model="selectedChapter" placeholder="选择章节" style="width: 180px">
               <el-option label="第 3 章 · 运输层" value="ch3" />
               <el-option label="第 4 章 · 网络层" value="ch4" />
               <el-option label="第 5 章 · 链路层" value="ch5" />
             </el-select>
-            <el-select v-model="selectedCount" placeholder="题目数量" style="width: 140px">
+            <el-select v-model="selectedType" placeholder="选择题型" style="width: 150px">
+              <el-option label="单选题" value="single" />
+              <el-option label="多选题" value="multiple" />
+              <el-option label="综合问答题" value="essay" />
+            </el-select>
+            <el-select v-model="selectedDifficulty" placeholder="选择难度" style="width: 130px">
+              <el-option label="简单" value="easy" />
+              <el-option label="中等" value="medium" />
+              <el-option label="困难" value="hard" />
+            </el-select>
+            <el-select v-model="selectedCount" placeholder="题目数量" style="width: 130px">
               <el-option label="3 题" value="3" />
               <el-option label="5 题" value="5" />
               <el-option label="10 题" value="10" />
             </el-select>
-            <el-button type="primary" size="large" round :disabled="!selectedChapter" @click="startTraining">开始训练</el-button>
+            <el-button
+              type="primary"
+              size="large"
+              round
+              :disabled="!selectedChapter || !selectedType || !selectedDifficulty"
+              @click="startTraining"
+            >
+              开始训练
+            </el-button>
           </div>
         </div>
 
@@ -735,7 +830,9 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               返回章节选择
             </el-button>
             <span class="practice-session-tag">
-              {{ selectedChapter === 'ch3' ? '第 3 章 · 运输层' : selectedChapter === 'ch4' ? '第 4 章 · 网络层' : '第 5 章 · 链路层' }}
+              {{ chapterLabel }}
+              · {{ selectedType === 'single' ? '单选题' : selectedType === 'multiple' ? '多选题' : '综合问答题' }}
+              · {{ selectedDifficulty === 'easy' ? '简单' : selectedDifficulty === 'medium' ? '中等' : '困难' }}
               · {{ selectedCount }} 题
             </span>
           </div>
@@ -750,10 +847,12 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               请简述 TCP 拥塞控制中<strong>慢启动</strong>与<strong>拥塞避免</strong>两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。
             </p>
 
-            <!-- KaTeX 编辑器 -->
-            <div class="pqc-editor">
-              <KaTeXEditor v-model="trainingAnswer" :readonly="isSubmitted" placeholder="在此作答，可混合文本与 LaTeX 公式…&#10;&#10;例如：慢启动阶段 cwnd 呈指数增长，公式为&#10;&#10;$$cwnd_{n+1} = 2 \\cdot cwnd_n$$&#10;&#10;而拥塞避免阶段 cwnd 每 RTT 线性增长 1 MSS…" />
-            </div>
+            <!-- 作答区：编辑器 + 实时预览（KaTeXEditor 内置双栏布局） -->
+            <KaTeXEditor
+              v-model="trainingAnswer"
+              :readonly="isSubmitted"
+              placeholder="在此作答，可混合文本与 LaTeX 公式…&#10;&#10;例如：慢启动阶段 cwnd 呈指数增长，公式为&#10;&#10;$$cwnd_{n+1} = 2 \\cdot cwnd_n$$&#10;&#10;而拥塞避免阶段 cwnd 每 RTT 线性增长 1 MSS…"
+            />
 
             <!-- 提交按钮（与编辑器、评测报告同级） -->
             <div v-if="!isSubmitted" class="pqc-submit-area">
@@ -769,26 +868,115 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               </el-button>
             </div>
 
-            <!-- 评测报告（与编辑器同级，自然流式排布，无绝对定位） -->
+            <!-- ================================================ -->
+            <!-- 评测报告：得分仪表 + Agent 反馈 + 讲解 + 溯源     -->
+            <!-- ================================================ -->
             <div v-if="isSubmitted && evaluationReport" class="pqc-report">
-              <div class="pqc-report-header">
-                <span class="pqc-report-title">📊 评测报告</span>
-                <span class="pqc-report-score">
-                  <span class="pqc-score-num">{{ evaluationReport.score }}</span>
-                  <span class="pqc-score-sep">/</span>
-                  <span class="pqc-score-total">{{ evaluationReport.total }}</span>
-                </span>
+              <!-- ---------- 顶部：得分仪表 + 置信度 ---------- -->
+              <div class="pqc-report-hero">
+                <!-- 得分圆环仪表 -->
+                <div class="pqc-score-gauge">
+                  <svg class="pqc-gauge-svg" viewBox="0 0 120 120">
+                    <circle
+                      cx="60" cy="60" r="54"
+                      fill="none"
+                      stroke="var(--border)"
+                      stroke-width="8"
+                    />
+                    <circle
+                      cx="60" cy="60" r="54"
+                      fill="none"
+                      :stroke="scorePercent >= 80 ? '#34d399' : scorePercent >= 60 ? '#f59e0b' : '#f87171'"
+                      stroke-width="8"
+                      stroke-linecap="round"
+                      :stroke-dasharray="`${scoreRingDash.filled} ${scoreRingDash.circumference - scoreRingDash.filled}`"
+                      transform="rotate(-90 60 60)"
+                      class="pqc-gauge-arc"
+                    />
+                    <text x="60" y="56" text-anchor="middle" class="pqc-gauge-score">
+                      {{ evaluationReport.score }}
+                    </text>
+                    <text x="60" y="74" text-anchor="middle" class="pqc-gauge-label">
+                      / {{ evaluationReport.total }}
+                    </text>
+                  </svg>
+                </div>
+
+                <!-- 得分元信息 -->
+                <div class="pqc-score-meta">
+                  <div :class="['pqc-grade-badge', scoreGrade]">
+                    {{ scorePercent >= 80 ? '🎯 优秀' : scorePercent >= 60 ? '📖 良好' : '📝 需加强' }}
+                  </div>
+                  <div class="pqc-confidence">
+                    <span class="pqc-conf-label">评测置信度</span>
+                    <div class="pqc-conf-bar-track">
+                      <div
+                        class="pqc-conf-bar-fill"
+                        :style="{ width: Math.round(evaluationReport.confidence * 100) + '%' }"
+                      ></div>
+                    </div>
+                    <span class="pqc-conf-pct">{{ Math.round(evaluationReport.confidence * 100) }}%</span>
+                  </div>
+                </div>
               </div>
-              <p class="pqc-report-analysis" v-html="renderMixedHtml(evaluationReport.analysis)" />
-              <ul class="pqc-report-highlights">
-                <li
-                  v-for="(item, hi) in evaluationReport.highlights"
-                  :key="hi"
-                  :class="['pqc-hl-item', item.startsWith('✅') ? 'hl-good' : item.startsWith('⚠️') ? 'hl-warn' : 'hl-tip']"
-                >
-                  {{ item }}
-                </li>
-              </ul>
+
+              <!-- ---------- Agent 分步反馈 ---------- -->
+              <div class="pqc-report-section">
+                <h4 class="pqc-section-title">🤖 Agent 协同执行轨迹</h4>
+                <div class="pqc-agent-steps">
+                  <div
+                    v-for="step in agentSteps"
+                    :key="step.agentRole"
+                    :class="['pqc-agent-chip', step.status]"
+                  >
+                    <span :class="['pqc-agent-dot', step.status]"></span>
+                    <span class="pqc-agent-role">{{ step.agentLabel }}</span>
+                    <span class="pqc-agent-summary">{{ step.summary }}</span>
+                    <span v-if="step.durationMs" class="pqc-agent-dur">{{ step.durationMs }}ms</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ---------- 详细讲解 ---------- -->
+              <div class="pqc-report-section">
+                <h4 class="pqc-section-title">📖 详细讲解</h4>
+                <div class="pqc-analysis-content" v-html="renderMixedHtml(evaluationReport.analysis)" />
+              </div>
+
+              <!-- ---------- 分步评测要点 ---------- -->
+              <div class="pqc-report-section">
+                <h4 class="pqc-section-title">🔍 分步评测要点</h4>
+                <ul class="pqc-report-highlights">
+                  <li
+                    v-for="(item, hi) in evaluationReport.highlights"
+                    :key="hi"
+                    :class="['pqc-hl-item', item.startsWith('✅') ? 'hl-good' : item.startsWith('⚠️') ? 'hl-warn' : 'hl-tip']"
+                  >
+                    {{ item }}
+                  </li>
+                </ul>
+              </div>
+
+              <!-- ---------- 文档溯源引用 ---------- -->
+              <div v-if="evaluationReport.sourceRefs.length > 0" class="pqc-report-section">
+                <h4 class="pqc-section-title">📚 评测依据 · 文档溯源</h4>
+                <div class="pqc-source-grid">
+                  <div
+                    v-for="ref in evaluationReport.sourceRefs"
+                    :key="ref.refId"
+                    class="pqc-source-card"
+                  >
+                    <div class="pqc-source-head">
+                      <span class="pqc-source-badge">[{{ ref.refId }}]</span>
+                      <span class="pqc-source-doc">{{ ref.documentName }}</span>
+                      <span class="pqc-source-page">第 {{ ref.pageNumber }} 页</span>
+                    </div>
+                    <blockquote class="pqc-source-excerpt">
+                      "{{ ref.excerpt }}"
+                    </blockquote>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1884,10 +2072,6 @@ export function renderMarkdownLine(line: string): string {
   flex-shrink: 0;
 }
 
-/* 编辑器容器：不再 flex: 1 贪婪占满空间，由内部 KaTeXEditor 自身 minHeight 决定高度 */
-.pqc-editor {
-  /* 自然高度，不拉伸 */
-}
 
 /* ---- 提交按钮（流式排布，不脱离文档流）---- */
 
@@ -1900,55 +2084,230 @@ export function renderMarkdownLine(line: string): string {
 /* ---- 评测报告（流式排布，无绝对定位 / 负 margin）---- */
 
 .pqc-report {
-  padding: 20px 24px;
-  border-radius: 12px;
+  padding: 24px 28px;
+  border-radius: 14px;
   background: var(--code-bg, #f4f3ec);
-  border: 1px solid var(--accent-border, rgba(170, 59, 255, 0.5));
+  border: 1px solid var(--accent-border, rgba(170, 59, 255, 0.3));
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ---- 得分仪表区 ---- */
+
+.pqc-report-hero {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.pqc-score-gauge {
   flex-shrink: 0;
 }
 
-.pqc-report-header {
+.pqc-gauge-svg {
+  width: 120px;
+  height: 120px;
+  display: block;
+}
+
+.pqc-gauge-arc {
+  transition: stroke-dasharray 0.8s ease;
+}
+
+.pqc-gauge-score {
+  font-size: 28px;
+  font-weight: 800;
+  fill: var(--text-h, #08060d);
+}
+
+.pqc-gauge-label {
+  font-size: 12px;
+  fill: var(--text, #6b6375);
+  opacity: 0.7;
+}
+
+.pqc-score-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.pqc-grade-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  font-size: 18px;
+  font-weight: 700;
+  padding: 6px 18px;
+  border-radius: 10px;
+}
+
+.pqc-grade-badge.grade-high {
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+}
+
+.pqc-grade-badge.grade-mid {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+}
+
+.pqc-grade-badge.grade-low {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+}
+
+/* ---- 置信度 ---- */
+
+.pqc-confidence {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 14px;
+  gap: 10px;
 }
 
-.pqc-report-title {
-  font-size: 16px;
+.pqc-conf-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text, #6b6375);
+  white-space: nowrap;
+}
+
+.pqc-conf-bar-track {
+  flex: 1;
+  max-width: 140px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border, #e5e4e7);
+  overflow: hidden;
+}
+
+.pqc-conf-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent, #aa3bff);
+  transition: width 0.6s ease;
+}
+
+.pqc-conf-pct {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent, #aa3bff);
+  font-family: var(--mono);
+}
+
+/* ---- 报告分区 ---- */
+
+.pqc-report-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pqc-section-title {
+  font-size: 14px;
   font-weight: 700;
   color: var(--text-h, #08060d);
+  margin: 0;
 }
 
-.pqc-report-score {
+/* ---- Agent 分步反馈 ---- */
+
+.pqc-agent-steps {
   display: flex;
-  align-items: baseline;
-  gap: 2px;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.pqc-score-num {
-  font-size: 32px;
-  font-weight: 800;
-  color: var(--accent, #aa3bff);
-  line-height: 1;
+.pqc-agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, #e5e4e7);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: border-color 0.2s;
 }
 
-.pqc-score-sep {
-  font-size: 20px;
-  color: var(--text, #6b6375);
-  margin: 0 2px;
+.pqc-agent-chip.succeeded {
+  border-left: 3px solid #34d399;
 }
 
-.pqc-score-total {
-  font-size: 20px;
-  color: var(--text, #6b6375);
+.pqc-agent-chip.running {
+  border-left: 3px solid var(--accent, #aa3bff);
 }
 
-.pqc-report-analysis {
-  font-size: 14px;
-  line-height: 1.75;
+.pqc-agent-chip.failed {
+  border-left: 3px solid #f87171;
+}
+
+.pqc-agent-chip.idle {
+  border-left: 3px solid var(--border, #e5e4e7);
+  opacity: 0.55;
+}
+
+.pqc-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pqc-agent-dot.succeeded { background: #34d399; }
+.pqc-agent-dot.running { background: var(--accent, #aa3bff); animation: pulse 1.2s infinite; }
+.pqc-agent-dot.failed { background: #f87171; }
+.pqc-agent-dot.idle { background: var(--border, #e5e4e7); }
+
+.pqc-agent-role {
+  font-weight: 700;
   color: var(--text-h, #08060d);
-  margin: 0 0 16px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.pqc-agent-summary {
+  color: var(--text, #6b6375);
+  flex: 1;
+  min-width: 0;
+}
+
+.pqc-agent-dur {
+  font-size: 11px;
+  color: var(--text, #6b6375);
+  opacity: 0.5;
+  font-family: var(--mono);
+  flex-shrink: 0;
+}
+
+/* ---- 详细讲解文本 ---- */
+
+.pqc-analysis-content {
+  font-size: 14.5px;
+  line-height: 1.85;
+  color: var(--text-h, #08060d);
+  padding: 14px 18px;
+  background: var(--bg, #fff);
+  border-radius: 10px;
+  border: 1px solid var(--border, #e5e4e7);
+}
+
+.pqc-analysis-content :deep(.katex-display) {
+  margin: 10px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.pqc-analysis-content :deep(.katex) {
+  font-size: 1.05em;
+}
+
+.pqc-analysis-content :deep(.katex-error) {
+  color: #dc2626 !important;
+  border-bottom: 1px dashed #dc2626;
 }
 
 .pqc-report-highlights {
@@ -1982,6 +2341,80 @@ export function renderMarkdownLine(line: string): string {
   color: #2563eb;
 }
 
+/* ---- 文档溯源引用卡片 ---- */
+
+.pqc-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.pqc-source-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 10px;
+  background: var(--bg, #fff);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.2s;
+}
+
+.pqc-source-card:hover {
+  border-color: var(--accent-border, rgba(170, 59, 255, 0.4));
+}
+
+.pqc-source-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pqc-source-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--accent, #aa3bff);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.pqc-source-doc {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-h, #08060d);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pqc-source-page {
+  font-size: 11px;
+  color: var(--accent, #aa3bff);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.pqc-source-excerpt {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--code-bg, #f4f3ec);
+  border-left: 3px solid var(--accent-border, rgba(170, 59, 255, 0.4));
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--text, #6b6375);
+  line-height: 1.6;
+  font-style: italic;
+}
+
 /* 答题区深色模式 */
 @media (prefers-color-scheme: dark) {
   .pqc-prompt {
@@ -1990,11 +2423,43 @@ export function renderMarkdownLine(line: string): string {
 
   .pqc-report {
     background: var(--code-bg, #1f2028);
-    border-color: var(--accent-border, rgba(192, 132, 252, 0.5));
+    border-color: var(--accent-border, rgba(192, 132, 252, 0.4));
   }
 
-  .pqc-report-analysis {
+  .pqc-gauge-score {
+    fill: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-gauge-label {
+    fill: var(--text, #9ca3af);
+  }
+
+  .pqc-section-title {
     color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-agent-chip {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+  }
+
+  .pqc-agent-role {
+    color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-agent-summary {
+    color: var(--text, #9ca3af);
+  }
+
+  .pqc-analysis-content {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+    color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-analysis-content :deep(.katex-error) {
+    color: #fca5a5 !important;
+    border-bottom-color: #fca5a5;
   }
 
   .pqc-hl-item.hl-good {
@@ -2012,12 +2477,23 @@ export function renderMarkdownLine(line: string): string {
     color: #93c5fd;
   }
 
-  .pqc-report-title {
+  .pqc-source-card {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+  }
+
+  .pqc-source-doc {
     color: var(--text-h, #f3f4f6);
   }
+
+  .pqc-source-excerpt {
+    background: var(--code-bg, #1f2028);
+    color: var(--text, #9ca3af);
+  }
+
 }
 
-/* 答题区响应式 */
+/* 答题区响应式：中等屏幕 → 双栏变堆叠 */
 @media (max-width: 1024px) {
   .practice-session-header {
     flex-wrap: wrap;
@@ -2027,6 +2503,81 @@ export function renderMarkdownLine(line: string): string {
   .pqc-prompt {
     font-size: 14px;
     padding: 12px 14px;
+  }
+
+  /* 评测报告 */
+  .pqc-report {
+    padding: 18px 20px;
+    gap: 18px;
+  }
+
+  .pqc-report-hero {
+    gap: 18px;
+  }
+
+  .pqc-source-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 答题区响应式：手机端 → 进一步压缩间距 */
+@media (max-width: 768px) {
+  /* 评测报告移动端 */
+  .pqc-report {
+    padding: 14px 16px;
+    gap: 14px;
+  }
+
+  .pqc-report-hero {
+    gap: 14px;
+  }
+
+  .pqc-gauge-svg {
+    width: 90px;
+    height: 90px;
+  }
+
+  .pqc-gauge-score {
+    font-size: 22px;
+  }
+
+  .pqc-grade-badge {
+    font-size: 15px;
+    padding: 4px 14px;
+  }
+
+  .pqc-agent-chip {
+    padding: 8px 10px;
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .pqc-agent-role {
+    font-size: 11px;
+  }
+
+  .pqc-agent-summary {
+    font-size: 11px;
+  }
+
+  .pqc-analysis-content {
+    font-size: 13.5px;
+    padding: 10px 14px;
+  }
+
+  .pqc-source-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .pqc-source-card {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .pqc-source-excerpt {
+    font-size: 11.5px;
+    padding: 8px 10px;
   }
 }
 

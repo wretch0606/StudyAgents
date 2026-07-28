@@ -6,6 +6,7 @@
 
 本周的功能取舍、验收用例和质量门槛以 [docs/MVP_SCOPE.md](docs/MVP_SCOPE.md) 为准。
 课程样例来源见 [docs/COURSE_MATERIALS.md](docs/COURSE_MATERIALS.md)，集成门结果统一记录在 [docs/ACCEPTANCE_TRACKER.md](docs/ACCEPTANCE_TRACKER.md)。
+第 6 天使用的 50 条评测基线、双人标注流程和指标工具见 [tests/evaluation/README.md](tests/evaluation/README.md)。
 
 ## 核心能力
 

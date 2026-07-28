@@ -17,9 +17,9 @@ from typing import Optional
 
 import fitz  # PyMuPDF
 
-from worker.config import DIGITAL_TEXT_MIN_CHARS, OCR_REVIEW_THRESHOLD, PAGE_IMAGES_DIR
-from worker.ingestion.parsers.ocr import OCRInterface, OCRResult, create_ocr_engine
-from worker.schemas import BlockType, LayoutBlock, PageResult, PageType
+from apps.worker.config import DIGITAL_TEXT_MIN_CHARS, OCR_REVIEW_THRESHOLD, PAGE_IMAGES_DIR
+from apps.worker.ingestion.parsers.ocr import OCRInterface, OCRResult, create_ocr_engine
+from apps.worker.schemas import BlockType, LayoutBlock, PageResult, PageType
 
 logger = logging.getLogger(__name__)
 

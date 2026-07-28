@@ -1,45 +1,51 @@
 <script setup lang="ts">
 // ============================================================
-// StudyAgents — 错题本页（占位）
+// StudyAgents — 错题本独立路由页
 //
-// 后续填充：错题列表、状态筛选、重新练习、查看解析 UI
+// 该页面直接重定向到首页的错题本内嵌视图（/?mode=wrongbook），
+// 确保通过 /wrong-book 直接访问时也能看到完整的错题本界面。
 // ============================================================
+import { onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
+
+onMounted(() => {
+  router.replace({ path: '/', query: { mode: 'wrongbook' } })
+})
 </script>
 
 <template>
-  <div class="page-placeholder">
-    <span class="page-icon">📖</span>
-    <h1>错题本</h1>
-    <p>错题回顾 · 状态追踪 · 针对性复习</p>
+  <div class="wb-redirect">
+    <span class="wb-redirect-icon">📖</span>
+    <p>正在跳转至错题本…</p>
   </div>
 </template>
 
 <style scoped>
-.page-placeholder {
+.wb-redirect {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  gap: 10px;
-  color: #e0e0e0;
+  gap: 12px;
+  color: #888;
   background: #1a1a2e;
 }
 
-.page-icon {
+.wb-redirect-icon {
   font-size: 48px;
+  animation: wb-pulse 1.2s ease-in-out infinite;
 }
 
-.page-placeholder h1 {
-  font-size: 28px;
-  font-weight: 700;
-  margin: 0;
-  letter-spacing: 1px;
+@keyframes wb-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.95); }
 }
 
-.page-placeholder p {
-  color: #888;
-  margin: 0;
+.wb-redirect p {
   font-size: 14px;
+  margin: 0;
 }
 </style>
