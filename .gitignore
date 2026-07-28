@@ -45,3 +45,6 @@ tests/evaluation/private/
 # Documents (not tracked)
 *.docx
 _docx_extracted/
+
+# Local course/evaluation working data
+.local-data/
