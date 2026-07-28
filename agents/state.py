@@ -44,7 +44,7 @@ class SourceRef(TypedDict):
 
 class KnowledgeItem(TypedDict):
     fact: str
-    source_ref_ids: list[str]  # 指向 SourceRef.document_id
+    source_ref_ids: list[str]  # 指向 SourceRef.chunk_id
     knowledge_point_ids: list[str]
 
 
@@ -87,6 +87,10 @@ class AgentState(TypedDict, total=False):
     error: Optional[ApiError]
 
     # ── private ──
+    normalized_query: str
+    next_node: Literal["knowledge", "evaluator_qa", "refusal", "error", "__end__"]
+    sufficient: bool
+    reason: str
     evidence: list[SourceRef]       # 可能含 staff_only 块
     knowledge: list[KnowledgeItem]
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Optional
+from typing import Optional
 
 # 确保项目根在 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -121,7 +121,7 @@ def test_public_question_no_answer_leak():
     forbidden = ["expected_answer", "rubric", "answer_private", "private_content", "private", "step_scores"]
     for key in forbidden:
         if key in pq:
-            _fail(f"泄露检测", f"public_question 包含禁止字段 '{key}'")
+            _fail("泄露检测", f"public_question 包含禁止字段 '{key}'")
         else:
             _ok(f"无泄露: public_question 不含 '{key}'")
 

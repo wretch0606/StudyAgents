@@ -16,13 +16,26 @@ LangGraph 固定状态图，对应开发文档 6.3 节（图 4）。
   - ModelMessage:     from apps.api.services.model_gateway
   - HybridRetriever:  from worker.retrieval.retriever (B 提供)
 """
-from __future__ import annotations
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any, Mapping, Optional
 
-import time
-import uuid
-from typing import Any, Literal, Optional
+try:
+    from langchain_core.runnables import RunnableConfig
+except ImportError:
+    RunnableConfig = dict[str, Any]  # type: ignore[misc,assignment]
 
-from .state import AgentState, RetrievalFilters, SourceRef
+from .state import AgentState, SourceRef
+
+try:
+    from worker.schemas import (
+        RetrievalFilters as WorkerRetrievalFilters,
+        SourceRef as WorkerSourceRef,
+    )
+except ImportError:
+    from apps.worker.schemas import (
+        RetrievalFilters as WorkerRetrievalFilters,
+        SourceRef as WorkerSourceRef,
+    )
 
 # ── D 提供的接口 ─────────────────────────────────────
 # 这些 import 路径来自 D 的接口文档
@@ -33,10 +46,23 @@ try:
     from apps.api.services.agent_event_sink import agent_event_sink
     from apps.api.services.model_gateway import ModelGateway, ModelMessage
 except ImportError:
-    # D 的代码尚未合入时降级为 Protocol + 占位
-    ModelGateway = object  # type: ignore
-    ModelMessage = object  # type: ignore
-    AgentEventDraft = object  # type: ignore
+    # D 的代码尚未合入时提供可运行的最小消息类型，便于独立测试 C。
+    ModelGateway = Any  # type: ignore
+
+    @dataclass(frozen=True)
+    class ModelMessage:  # type: ignore[no-redef]
+        role: str
+        content: str
+
+    @dataclass(frozen=True)
+    class AgentEventDraft:  # type: ignore[no-redef]
+        agent: str
+        event_type: str
+        status: str
+        summary: str
+        source_refs: list[SourceRef]
+        duration_ms: int
+
     agent_event_sink = None
 
 # ── C 的 Pydantic Schema ─────────────────────────────
@@ -76,12 +102,80 @@ def _build_messages(system_prompt: str, user_message: str) -> list:
     ]
 
 
+def _configurable(config: RunnableConfig | None) -> Mapping[str, Any]:
+    """Return LangGraph configurable values without leaking them into state."""
+    if config is None:
+        return {}
+    configurable = config.get("configurable", {})
+    return configurable if isinstance(configurable, Mapping) else {}
+
+
+def _require_dependency(
+    config: RunnableConfig | None,
+    name: str,
+) -> Any:
+    dependency = _configurable(config).get(name)
+    if dependency is None:
+        raise RuntimeError(f"LangGraph config.configurable 缺少依赖: {name}")
+    return dependency
+
+
+def _build_worker_filters(filters: Mapping[str, Any]) -> WorkerRetrievalFilters:
+    """Adapt AgentState's JSON-friendly filter mapping to B's dataclass."""
+    return WorkerRetrievalFilters(
+        chapter_ids=list(filters.get("chapter_ids", [])),
+        question_types=filters.get("question_types"),
+        difficulty=filters.get("difficulty"),
+        exclude_chunk_ids=list(filters.get("exclude_chunk_ids", [])),
+        knowledge_point_ids=list(filters.get("knowledge_point_ids", [])),
+        year=filters.get("year"),
+    )
+
+
+def _source_ref_to_state(ref: WorkerSourceRef | Mapping[str, Any]) -> SourceRef:
+    """Normalize B's dataclass SourceRef into serializable LangGraph state."""
+    if isinstance(ref, Mapping):
+        data = dict(ref)
+    elif is_dataclass(ref):
+        data = asdict(ref)
+    elif hasattr(ref, "model_dump"):
+        data = ref.model_dump()
+    else:
+        data = {
+            field: getattr(ref, field)
+            for field in (
+                "document_id",
+                "document_name",
+                "page_number",
+                "question_no",
+                "chunk_id",
+                "excerpt",
+                "page_image_url",
+                "score",
+            )
+        }
+
+    return SourceRef(
+        document_id=str(data["document_id"]),
+        document_name=str(data["document_name"]),
+        page_number=int(data["page_number"]),
+        question_no=data.get("question_no"),
+        chunk_id=str(data["chunk_id"]),
+        excerpt=str(data["excerpt"]),
+        page_image_url=data.get("page_image_url"),
+        score=float(data.get("score", 0.0)),
+    )
+
+
 # ═══════════════════════════════════════════════════════
 # 节点函数
 # ═══════════════════════════════════════════════════════
 
 
-async def coordinator_node(state: AgentState, model: ModelGateway) -> dict[str, Any]:
+async def coordinator_node(
+    state: AgentState,
+    config: RunnableConfig | None = None,
+) -> dict[str, Any]:
     """
     协调节点：意图识别 + 路由决策。
 
@@ -101,10 +195,12 @@ async def coordinator_node(state: AgentState, model: ModelGateway) -> dict[str, 
         decision = CoordinatorDecision(
             intent="qa_ask",
             normalized_query=user_input.strip(),
+            filters=state.get("filters", {}),
             next_node="knowledge",
             public_summary="协调 Agent 识别为自由问答模式，路由至知识 Agent",
         )
     else:
+        model: ModelGateway = _require_dependency(config, "model")
         state["model_calls"] = state.get("model_calls", 0) + 1
         user_msg = COORDINATOR_USER.format(
             mode=mode,
@@ -132,19 +228,21 @@ async def coordinator_node(state: AgentState, model: ModelGateway) -> dict[str, 
         event_type="agent.summary",
         status="succeeded",
         summary=decision.public_summary,
+        config=config,
     )
 
     return {
         "normalized_query": decision.normalized_query,
         "filters": decision.filters.model_dump() if hasattr(decision.filters, "model_dump") else {},
         "next_node": decision.next_node,
+        "model_calls": state.get("model_calls", 0),
+        "node_hops": state.get("node_hops", 0),
     }
 
 
 async def knowledge_node(
     state: AgentState,
-    model: ModelGateway,
-    retriever: Any,  # B 的 HybridRetriever
+    config: RunnableConfig | None = None,
 ) -> dict[str, Any]:
     """
     知识节点：检索 + 证据充分性判断。
@@ -155,21 +253,19 @@ async def knowledge_node(
         return _error_return(state, "AGENT_LIMIT_EXCEEDED", "超过调用或节点上限", False)
 
     # Step 1: 调用 B 的检索接口
+    model: ModelGateway = _require_dependency(config, "model")
+    retriever = _require_dependency(config, "retriever")
     filters = state.get("filters", {})
     retrieval_result = await retriever.retrieve(
         query=state.get("normalized_query", state.get("user_input", "")),
-        filters=RetrievalFilters(
-            chapter_ids=filters.get("chapter_ids", []),
-            question_types=filters.get("question_types"),
-            difficulty=filters.get("difficulty"),
-            exclude_chunk_ids=filters.get("exclude_chunk_ids", []),
-            knowledge_point_ids=filters.get("knowledge_point_ids", []),
-            year=filters.get("year"),
-        ) if filters else RetrievalFilters(),
+        filters=_build_worker_filters(filters),
         user_role="member",
     )
 
-    evidence: list[SourceRef] = retrieval_result.source_refs[:MAX_EVIDENCE]
+    evidence: list[SourceRef] = [
+        _source_ref_to_state(ref)
+        for ref in retrieval_result.source_refs[:MAX_EVIDENCE]
+    ]
 
     # Step 2: LLM 整理知识
     state["model_calls"] = state.get("model_calls", 0) + 1
@@ -212,6 +308,7 @@ async def knowledge_node(
         status="succeeded",
         summary=summary,
         source_refs=evidence if kr.sufficient else [],
+        config=config,
     )
 
     return {
@@ -220,10 +317,15 @@ async def knowledge_node(
         "sufficient": kr.sufficient,
         "reason": kr.reason,
         "next_node": "evaluator_qa" if kr.sufficient else "refusal",
+        "model_calls": state.get("model_calls", 0),
+        "node_hops": state.get("node_hops", 0),
     }
 
 
-async def evaluator_qa_node(state: AgentState, model: ModelGateway) -> dict[str, Any]:
+async def evaluator_qa_node(
+    state: AgentState,
+    config: RunnableConfig | None = None,
+) -> dict[str, Any]:
     """
     评测讲解节点（问答模式）：组织答案 + 引用核验。
     """
@@ -233,6 +335,7 @@ async def evaluator_qa_node(state: AgentState, model: ModelGateway) -> dict[str,
     if _limits_exceeded(state):
         return _error_return(state, "AGENT_LIMIT_EXCEEDED", "超过调用或节点上限", False)
 
+    model: ModelGateway = _require_dependency(config, "model")
     evidence = state.get("evidence", [])
     knowledge = state.get("knowledge", [])
 
@@ -247,6 +350,7 @@ async def evaluator_qa_node(state: AgentState, model: ModelGateway) -> dict[str,
                 event_type="agent.summary",
                 status="failed",
                 summary="引用核验失败——有结论无对应 SourceRef，阻止输出",
+                config=config,
             )
             return _error_return(state, "AGENT_OUTPUT_INVALID", "回答中包含无法核验的引用", True)
 
@@ -285,18 +389,25 @@ async def evaluator_qa_node(state: AgentState, model: ModelGateway) -> dict[str,
         status="succeeded",
         summary=answer.public_summary,
         source_refs=evidence,
+        config=config,
     )
 
     return {
         "public_response": answer.answer,
         "next_node": "__end__",
+        "model_calls": state.get("model_calls", 0),
+        "node_hops": state.get("node_hops", 0),
     }
 
 
-async def refusal_node(state: AgentState) -> dict[str, Any]:
+async def refusal_node(
+    state: AgentState,
+    config: RunnableConfig | None = None,
+) -> dict[str, Any]:
     """拒答节点：生成结构化拒答回应"""
     from .prompts.refusal import RefusalTemplate
 
+    state["node_hops"] = state.get("node_hops", 0) + 1
     reason = state.get("reason", "no_results")
     filters = state.get("filters", {})
     chapters = filters.get("chapter_ids", [])
@@ -318,16 +429,23 @@ async def refusal_node(state: AgentState) -> dict[str, Any]:
         event_type="run.completed",
         status="succeeded",
         summary=f"已拒答——{reason}",
+        config=config,
     )
 
     return {
         "public_response": public_response,
         "next_node": "__end__",
+        "model_calls": state.get("model_calls", 0),
+        "node_hops": state.get("node_hops", 0),
     }
 
 
-async def error_node(state: AgentState) -> dict[str, Any]:
+async def error_node(
+    state: AgentState,
+    config: RunnableConfig | None = None,
+) -> dict[str, Any]:
     """失败节点"""
+    state["node_hops"] = state.get("node_hops", 0) + 1
     error_info = state.get("error", {})
     await _emit(
         state=state,
@@ -335,10 +453,13 @@ async def error_node(state: AgentState) -> dict[str, Any]:
         event_type="run.failed",
         status="failed",
         summary=f"运行失败——{error_info.get('code', 'UNKNOWN')}",
+        config=config,
     )
     return {
         "public_response": f"系统暂时无法完成：{error_info.get('message', '')}",
         "next_node": "__end__",
+        "model_calls": state.get("model_calls", 0),
+        "node_hops": state.get("node_hops", 0),
     }
 
 
@@ -351,6 +472,8 @@ def _error_return(state: AgentState, code: str, message: str, retryable: bool) -
     return {
         "next_node": "error",
         "error": {"code": code, "message": message, "retryable": retryable, "trace_id": state.get("trace_id", state["run_id"])},
+        "model_calls": state.get("model_calls", 0),
+        "node_hops": state.get("node_hops", 0),
     }
 
 
@@ -361,9 +484,12 @@ async def _emit(
     status: str,
     summary: str,
     source_refs: Optional[list[SourceRef]] = None,
+    config: RunnableConfig | None = None,
 ):
     """通过 D 的 AgentEventSink 发布公开事件"""
-    if agent_event_sink is None:
+    configurable = _configurable(config)
+    sink = configurable.get("event_sink", agent_event_sink)
+    if sink is None:
         return  # D 的代码尚未合入，静默跳过
 
     draft = AgentEventDraft(
@@ -374,11 +500,9 @@ async def _emit(
         source_refs=source_refs or [],
         duration_ms=0,
     )
-    # db_session 需通过 LangGraph config["configurable"]["db_session"] 传入
-    # 当前通过 state 传递引用，实际调用时由外层注入
-    db = state.get("_db_session")  # type: ignore
+    db = configurable.get("db_session")
     if db is not None:
-        await agent_event_sink.emit(
+        await sink.emit(
             run_id=state["run_id"],
             event=draft,
             db_session=db,
@@ -394,7 +518,7 @@ def build_qa_graph():
     """
     构建问答状态图。
 
-    依赖注入（通过 LangGraph config["configurable"] 传入）:
+    依赖注入（由各节点从 LangGraph config["configurable"] 读取）:
       - model:      D 的 ModelGateway 实例
       - retriever:  B 的 HybridRetriever 实例
       - db_session: SQLAlchemy AsyncSession
