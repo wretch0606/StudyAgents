@@ -18,6 +18,8 @@ async def create_practice_session(
     thread_id: str,
     title: str | None = None,
     total_questions: int = 5,
+    filters: dict | None = None,
+    target_count: int = 5,
 ) -> PracticeSession:
     ps = PracticeSession(
         id=session_id,
@@ -26,6 +28,8 @@ async def create_practice_session(
         title=title,
         status="active",
         mode="practice",
+        filters=filters,
+        target_count=target_count,
     )
     session.add(ps)
     await session.flush()

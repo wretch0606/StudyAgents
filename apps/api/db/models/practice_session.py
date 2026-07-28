@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from apps.api.db.base import Base, created_at_col, pk, updated_at_col
@@ -24,6 +24,8 @@ class PracticeSession(Base):
         String(32), nullable=False, default="active",
     )
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="practice")
+    filters: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    target_count: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     created_at = created_at_col()
     updated_at = updated_at_col()
 

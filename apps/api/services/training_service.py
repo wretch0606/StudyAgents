@@ -42,6 +42,12 @@ class TrainingService:
 
         await repo.create_practice_session(
             self._session, session_id=sid, user_id=user_id, thread_id=tid,
+            filters={
+                "chapter_ids": chapter_ids or [],
+                "question_types": question_types or ["choice"],
+                "difficulty": difficulty,
+            },
+            target_count=count,
         )
 
         questions = await self._adapter.generate_questions(

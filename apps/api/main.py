@@ -13,7 +13,17 @@ from fastapi.responses import JSONResponse
 from apps.api.config import settings
 from apps.api.middleware.logging import setup_logging
 from apps.api.middleware.trace import TraceMiddleware, get_trace_id
-from apps.api.routers import admin, agent_runs, auth, documents, grading, health, sessions, training
+from apps.api.routers import (
+    admin,
+    agent_runs,
+    auth,
+    documents,
+    grading,
+    health,
+    practice,
+    sessions,
+    training,
+)
 from apps.api.schemas.error import ApiError, ApiErrorResponse
 
 
@@ -42,8 +52,9 @@ def create_app() -> FastAPI:
     app.include_router(documents.router, prefix="/api")
     app.include_router(documents.job_router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")
-    app.include_router(training.router, prefix="/api")
-    app.include_router(grading.router, prefix="/api")
+    app.include_router(practice.router, prefix="/api")  # 正式契约：/api/practice/sessions
+    app.include_router(training.router, prefix="/api")  # 兼容旧路径 /api/training
+    app.include_router(grading.router, prefix="/api")  # 兼容旧路径 /api/training/{id}/submit
 
     # ---- 初始化 AgentRunnerService（默认使用 FakeAgentRunner） ----
     from apps.api.services.agent_event_sink import agent_event_sink
