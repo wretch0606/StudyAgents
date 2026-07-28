@@ -81,18 +81,21 @@ def test_compute_mastery_status(scores, expected) -> None:
 # compute_difficulty_adjustment
 # ============================================================
 
-@pytest.mark.parametrize("scores,current,expected", [
-    ([True, True], 2, 3),          # two good → +1
-    ([False, False], 2, 1),        # two bad → -1
-    ([True, True], 3, 3),          # at max, cannot increase
-    ([False, False], 1, 1),        # at min, cannot decrease
-    ([True], 2, 2),                # only one → no change
-    ([True, True], 1, 2),          # from 1 to 2
-    ([False, True], 2, 2),         # mixed → no change
-    ([True, True, True], 2, 3),    # three good → +1 (only checks last 2)
+@pytest.mark.parametrize("ratios,current,expected", [
+    ([0.9, 0.9], 2, 3),          # two >=0.8 → +1
+    ([0.3, 0.4], 2, 1),          # two <0.5 → -1
+    ([0.9, 0.9], 3, 3),          # at max, cannot increase
+    ([0.3, 0.4], 1, 1),          # at min, cannot decrease
+    ([0.9], 2, 2),               # only one → no change
+    ([0.9, 0.9], 1, 2),          # from 1 to 2
+    ([0.8, 0.9], 2, 3),          # exactly at threshold → +1
+    ([0.49, 0.3], 2, 1),         # just below 0.5 → -1
+    ([0.5, 0.5], 2, 2),          # exactly at 0.5 → no change (not <0.5)
+    ([0.6, 0.7], 2, 2),          # middle range → no change
+    ([0.3, 0.9], 2, 2),          # mixed → no change
 ])
-def test_compute_difficulty_adjustment(scores, current, expected) -> None:
-    assert compute_difficulty_adjustment(scores, current) == expected
+def test_compute_difficulty_adjustment(ratios, current, expected) -> None:
+    assert compute_difficulty_adjustment(ratios, current) == expected
 
 
 # ============================================================

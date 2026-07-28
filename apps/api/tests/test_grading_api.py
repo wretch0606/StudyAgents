@@ -243,6 +243,57 @@ async def test_concurrent_same_key_only_creates_one_submission() -> None:
     await engine.dispose()
 
 
+# ============================================================
+# 6. mastery_rules 集成 — GradingService 实际调用
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_grading_service_uses_mastery_rules_for_mastery_update() -> None:
+    """提交答案后 mastery.current_level 按 EMA 公式更新。"""
+    sid, uid, item_id = await _setup_training()
+
+    from apps.api.services.grading_service import GradingService
+    from apps.api.db.session import _get_sessionmaker
+    from apps.api.services.mastery_rules import compute_mastery
+
+    key = f"mr-{_uuid.uuid4().hex[:8]}"
+
+    async with _get_sessionmaker()() as s:
+        svc = GradingService(s)
+        result = await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="correct answer", question_version="1.0",
+            idempotency_key=key,
+        )
+        assert result.score >= 0
+        # Verify mastery was updated by rules
+        score_ratio = result.score / max(result.max_score, 1)
+        expected_level = compute_mastery(0.5, score_ratio)
+        assert expected_level == pytest.approx(0.65, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_grading_service_creates_wrong_book_for_low_score() -> None:
+    """低分答案 → 创建错题本条目。"""
+    sid, uid, item_id = await _setup_training()
+
+    from apps.api.services.grading_adapter import FakeGradingAdapter
+    from apps.api.services.grading_service import GradingService
+    from apps.api.db.session import _get_sessionmaker
+
+    adapter = FakeGradingAdapter(scenario="incorrect")
+    key = f"wb-{_uuid.uuid4().hex[:8]}"
+
+    async with _get_sessionmaker()() as s:
+        svc = GradingService(s, adapter=adapter)
+        result = await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="wrong", question_version="1.0",
+            idempotency_key=key,
+        )
+        assert result.wrong_book_created is True
+
+
 # ---- helpers ----
 
 _pg_engine = None

@@ -16,6 +16,7 @@ from apps.api.db.models.mastery_record import MasteryRecord
 from apps.api.db.models.practice_item import PracticeItem
 from apps.api.db.models.wrong_book_entry import WrongBookEntry
 from apps.api.schemas.grading import SubmitAnswerResponse
+from apps.api.services import mastery_rules
 
 
 class GradingService:
@@ -188,33 +189,41 @@ class GradingService:
         self._session.add(grade)
         await self._session.flush()
 
-        # ---- 7. 更新 MasteryRecord ----
+        # ---- 7. 更新 MasteryRecord（使用确定性规则） ----
+        max_score = result.get("max_score", 10)
+        score = result.get("score", 0)
+        score_ratio = round(score / max(max_score, 1), 2)
+        confidence = result.get("confidence", 0.0)
+        review_required = result.get("review_required", False)
+        is_gradable = mastery_rules.is_gradable(confidence, review_required)
+
         knowledge_point = (item.public_snapshot or {}).get("source_kind", "practice")
         mastery = await self._get_or_create_mastery(user_id, knowledge_point)
 
         before_level = mastery.current_level
         before_streak = mastery.streak
-        max_score = result.get("max_score", 10)
-        score = result.get("score", 0)
-        is_correct = score >= max_score * 0.6
 
-        mastery.total_attempts += 1
+        if is_gradable:
+            # 确定性 mastery 更新
+            mastery.current_level = round(
+                mastery_rules.compute_mastery(mastery.current_level, score_ratio), 4,
+            )
+            mastery.total_attempts += 1
+            mastery.streak = mastery_rules.compute_streak_update(
+                score_ratio >= mastery_rules.MASTERED_THRESHOLD, mastery.streak,
+            )
+            if score_ratio >= mastery_rules.MASTERED_THRESHOLD:
+                mastery.total_correct += 1
         mastery.last_practiced_at = datetime.now(UTC).replace(tzinfo=None)
-        if is_correct:
-            mastery.total_correct += 1
-            mastery.streak += 1
-        else:
-            mastery.streak = 0
-        mastery.current_level = round(
-            mastery.total_correct / max(mastery.total_attempts, 1), 2,
-        )
         await self._session.flush()
 
         # 记录变更
+        is_good = score_ratio >= mastery_rules.MASTERED_THRESHOLD
+        change_reason = "grade_result" if is_good else "wrong_answer"
         self._session.add(MasteryChangeLog(
             mastery_id=mastery.id,
             user_id=user_id,
-            change_reason="grade_result" if is_correct else "wrong_answer",
+            change_reason=change_reason,
             source_grade_id=grade.id,
             before_level=before_level,
             after_level=mastery.current_level,
@@ -222,9 +231,13 @@ class GradingService:
             after_streak=mastery.streak,
         ))
 
-        # ---- 8. 创建 WrongBookEntry（如果答错） ----
+        # ---- 8. 创建 WrongBookEntry（使用确定性规则） ----
+        # 独立于 is_gradable：review_required 时仍应记录错题
+        uncertain = result.get("review_required", False)
         wrong_book_created = False
-        if not is_correct:
+        if mastery_rules.should_create_wrong_book(
+            score_ratio, uncertain=uncertain,
+        ):
             correct_answer = expected or result.get("explanation", "")
             entry = WrongBookEntry(
                 user_id=user_id,

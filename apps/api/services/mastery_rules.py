@@ -37,7 +37,7 @@ def compute_mastery_status(recent_scores: list[bool]) -> str:
 
 
 def compute_difficulty_adjustment(
-    recent_scores: list[bool],
+    recent_score_ratios: list[float],
     current_difficulty: int,
     *,
     min_diff: int = MIN_DIFFICULTY,
@@ -45,15 +45,16 @@ def compute_difficulty_adjustment(
 ) -> int:
     """根据连续表现调整难度。
 
-    连续两次 >= 0.8 → 难度 +1。
-    连续两次 < 0.8（或 < 0.5）→ 难度 -1。
+    连续两次 >= MASTERED_THRESHOLD (0.8) → 难度 +1。
+    连续两次 < LOW_THRESHOLD (0.5) → 难度 -1。
     不越过 [min_diff, max_diff] 边界。
     """
     new_diff = current_difficulty
-    if len(recent_scores) >= 2:
-        if recent_scores[-1] and recent_scores[-2]:
+    if len(recent_score_ratios) >= 2:
+        a, b = recent_score_ratios[-2], recent_score_ratios[-1]
+        if a >= MASTERED_THRESHOLD and b >= MASTERED_THRESHOLD:
             new_diff = current_difficulty + 1
-        elif not recent_scores[-1] and not recent_scores[-2]:
+        elif a < LOW_THRESHOLD and b < LOW_THRESHOLD:
             new_diff = current_difficulty - 1
     return max(min_diff, min(max_diff, new_diff))
 
