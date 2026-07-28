@@ -50,6 +50,7 @@ class WorkerResult:
     output: dict[str, Any] = field(default_factory=dict)
     error_code: str = ""
     error_message: str = ""
+    retryable: bool | None = None
 
 
 # ---- 处理器接口 ----
