@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from worker.schemas import BlockType, LayoutBlock
+from apps.worker.schemas import BlockType, LayoutBlock
 
 logger = logging.getLogger(__name__)
 

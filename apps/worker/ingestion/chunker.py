@@ -22,7 +22,7 @@ import re
 from typing import Optional, Union
 from uuid import uuid4
 
-from worker.schemas import (
+from apps.worker.schemas import (
     Chunk,
     ChunkVisibility,
     ExamQuestion,

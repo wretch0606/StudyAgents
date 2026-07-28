@@ -1,0 +1,88 @@
+# StudyAgents Docker Compose
+# 启动: docker compose up -d
+# 停止: docker compose down
+# 仅 Windows + Docker Desktop 验证
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: studyagents-postgres
+    environment:
+      POSTGRES_USER: studyagents
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: studyagents
+    ports:
+      # 仅在开发时暴露到 localhost；生产删除此映射
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # 初始化脚本：确认 vector 扩展可用
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studyagents -d studyagents"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studyagents-api
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+psycopg://studyagents:change-me@postgres:5432/studyagents
+      - SESSION_SECRET=${SESSION_SECRET:-dev-secret-change-me}
+      - MODEL_BASE_URL=${MODEL_BASE_URL:-}
+      - MODEL_API_KEY=${MODEL_API_KEY:-}
+      - MODEL_TEXT_NAME=${MODEL_TEXT_NAME:-}
+      - MODEL_VISION_NAME=${MODEL_VISION_NAME:-}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-api}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
+      - FILES_ROOT=/data/files
+    ports:
+      - "8080:8000"
+    volumes:
+      - files_data:/data/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/live').status\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studyagents-worker
+    command: ["python", "-m", "apps.worker.main"]
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+psycopg://studyagents:change-me@postgres:5432/studyagents
+      - SESSION_SECRET=${SESSION_SECRET:-dev-secret-change-me}
+      - MODEL_BASE_URL=${MODEL_BASE_URL:-}
+      - MODEL_API_KEY=${MODEL_API_KEY:-}
+      - MODEL_TEXT_NAME=${MODEL_TEXT_NAME:-}
+      - MODEL_VISION_NAME=${MODEL_VISION_NAME:-}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-api}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
+      - FILES_ROOT=/data/files
+    volumes:
+      - files_data:/data/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  files_data:
+    driver: local

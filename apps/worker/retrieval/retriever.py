@@ -16,23 +16,23 @@ import logging
 import time
 from typing import Optional
 
-from worker.config import (
+from apps.worker.config import (
     RETRIEVAL_FINAL_K,
     RETRIEVAL_KEYWORD_K,
     RETRIEVAL_VECTOR_K,
     RRF_K,
 )
-from worker.retrieval.keyword_search import (
+from apps.worker.retrieval.keyword_search import (
     InMemoryKeywordBackend,
     KeywordSearchBackend,
     SearchHit,
 )
-from worker.retrieval.sufficiency import SufficiencyResult, judge_sufficiency
-from worker.retrieval.vector_search import (
+from apps.worker.retrieval.sufficiency import SufficiencyResult, judge_sufficiency
+from apps.worker.retrieval.vector_search import (
     InMemoryVectorBackend,
     VectorSearchBackend,
 )
-from worker.schemas import RetrievalFilters, RetrievalResult, SourceRef
+from apps.worker.schemas import RetrievalFilters, RetrievalResult, SourceRef
 
 logger = logging.getLogger(__name__)
 
