@@ -77,6 +77,30 @@ curl http://localhost:3000
 | API | http://localhost:8080 |
 | API 文档（开发模式） | http://localhost:8080/api/docs |
 
+### 备份与恢复
+
+```bash
+# 备份（数据库 + 原始文件卷）
+uv run python scripts/backup.py
+# 产物: ./backups/backup_<timestamp>_<githash>.tar.gz + .sha256
+
+# 恢复（需要确认；--force 跳过提示）
+uv run python scripts/restore.py ./backups/backup_20260728_120000_abc12345.tar.gz
+uv run python scripts/restore.py --force --skip-files ./backups/backup_20260728_120000_abc12345.tar.gz
+```
+
+恢复流程：
+1. SHA-256 校验备份完整性
+2. 确认目标环境（生产恢复需要人工确认）
+3. `pg_restore --clean --if-exists` 恢复数据库
+4. 解包文件卷到 `FILES_ROOT`
+5. `alembic upgrade head` 迁移兼容检查
+6. `document_id ↔ SourceRef` 引用一致性检查
+
+索引/向量数据策略：**不备份** — 可通过重跑 ingestion pipeline 重建（`docker compose exec worker python -m apps.worker.main`）
+
+失败回滚：恢复前自动创建备份快照；若恢复失败，使用原备份包重新执行。
+
 ### 查看日志
 
 ```bash
