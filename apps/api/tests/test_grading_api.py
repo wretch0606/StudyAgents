@@ -252,8 +252,8 @@ async def test_grading_service_uses_mastery_rules_for_mastery_update() -> None:
     """提交答案后 mastery.current_level 按 EMA 公式更新。"""
     sid, uid, item_id = await _setup_training()
 
-    from apps.api.services.grading_service import GradingService
     from apps.api.db.session import _get_sessionmaker
+    from apps.api.services.grading_service import GradingService
     from apps.api.services.mastery_rules import compute_mastery
 
     key = f"mr-{_uuid.uuid4().hex[:8]}"
@@ -277,9 +277,9 @@ async def test_grading_service_creates_wrong_book_for_low_score() -> None:
     """低分答案 → 创建错题本条目。"""
     sid, uid, item_id = await _setup_training()
 
+    from apps.api.db.session import _get_sessionmaker
     from apps.api.services.grading_adapter import FakeGradingAdapter
     from apps.api.services.grading_service import GradingService
-    from apps.api.db.session import _get_sessionmaker
 
     adapter = FakeGradingAdapter(scenario="incorrect")
     key = f"wb-{_uuid.uuid4().hex[:8]}"
