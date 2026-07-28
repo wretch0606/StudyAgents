@@ -516,10 +516,27 @@ async def _setup_training(uid=None):
             u = (await s.execute(sa_select(User).limit(1))).scalar_one()
             uid = str(u.id)
 
+    # 每个测试使用唯一的 source_kind 作为 knowledge_point 隔离键
+    unique_source = f"test-{_uuid.uuid4().hex[:8]}"
+
     async with _get_sessionmaker()() as s:
         svc = TrainingService(s)
         result = await svc.create_training(user_id=uid, count=3)
         sid = result["session_id"]
+
+    # 更新 items 的 public_snapshot，设置唯一的 source_kind 避免跨测试污染
+    async with _get_sessionmaker()() as s:
+        from sqlalchemy import select as sa_select
+
+        from apps.api.db.models.practice_item import PracticeItem as PIModel
+        items = (await s.execute(
+            sa_select(PIModel).where(PIModel.session_id == sid),
+        )).scalars().all()
+        for item in items:
+            pub = dict(item.public_snapshot) if item.public_snapshot else {}
+            pub["source_kind"] = unique_source
+            item.public_snapshot = pub
+        await s.commit()
 
     async with _get_sessionmaker()() as s:
         svc = TrainingService(s)

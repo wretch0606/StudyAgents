@@ -260,16 +260,20 @@ async def submit_answer(
             retryable=exc.retryable,
         ) from exc
 
-    # 创建 AgentRun 记录以对齐前端异步契约
+    # 创建 AgentRun + AgentEvents 以对齐前端异步契约
+    # 评分已同步完成 → run 状态为 "completed"，但通过持久化事件让 SSE 终端能正常关闭
+    from apps.api.db.models.agent_event import AgentEvent as AgentEventModel
+    from apps.api.services.sse_manager import sse_manager
+
     run_id = str(_uuid.uuid4())
     trace_id = _uuid.uuid4().hex[:16]
     now = datetime.now(UTC).replace(tzinfo=None)
     run = AgentRun(
         id=run_id,
-        thread_id=result.submission_id,  # reuse submission_id as thread grouping
+        thread_id=result.submission_id,
         user_id=user_id,
         mode="practice",
-        status="succeeded",
+        status="completed",
         run_type="practice_grade",
         trace_id=trace_id,
         timing={"total_ms": 0},
@@ -277,7 +281,33 @@ async def submit_answer(
         completed_at=now,
     )
     session.add(run)
+
+    # 写入两个最小事件：run.started + run.completed（SSE 历史回放 + 终态标记）
+    summary = (
+        f"score={result.score}/"
+        f"{getattr(result, 'max_score', 10)} "
+        f"verdict={getattr(result, 'verdict', 'N/A')}"
+    )
+    session.add(AgentEventModel(
+        run_id=run_id,
+        sequence_no=1,
+        agent="evaluator",
+        event_type="run.started",
+        status="succeeded",
+        summary="grading started",
+    ))
+    session.add(AgentEventModel(
+        run_id=run_id,
+        sequence_no=2,
+        agent="evaluator",
+        event_type="run.completed",
+        status="succeeded",
+        summary=summary[:2000],
+    ))
     await session.commit()
+
+    # 标记 SSE 完成，使晚订阅客户端能收到终态
+    sse_manager.mark_completed(run_id)
 
     return SubmitAnswerResponse(
         run_id=run_id,

@@ -88,6 +88,27 @@ class SSEManager:
             except Exception:
                 logger.exception("SSE history replay failed for run_id=%s", run_id)
 
+            # DB 回退检查：如果 run 在数据库中已是终态但 _run_completed 未标记
+            # （晚订阅、服务重启、或 practice_grade 等直接创建 completed run 的场景）
+            if not self.is_completed(run_id):
+                try:
+                    from apps.api.db.session import _get_sessionmaker
+                    from apps.api.repositories.agent_run import get_run
+                    async with _get_sessionmaker()() as db_session:
+                        db_run = await get_run(db_session, run_id, user_id=user_id)
+                        if db_run is not None and db_run.status in (
+                            "completed", "failed", "cancelled",
+                        ):
+                            terminal = (
+                                "run.failed" if db_run.status == "failed"
+                                else "run.completed"
+                            )
+                            self.mark_completed(run_id, event_type=terminal)
+                except Exception:
+                    logger.exception(
+                        "SSE DB fallback check failed for run_id=%s", run_id,
+                    )
+
             # 心跳 + 事件推送
             try:
                 while True:
