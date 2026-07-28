@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -24,6 +25,7 @@ from apps.api.schemas.error import ApiError
 from apps.api.services.file_storage import (
     FileValidationError,
     check_duplicate,
+    delete_stored_file,
     save_file,
     validate_extension,
     validate_magic,
@@ -61,6 +63,7 @@ def _doc_to_dict(doc) -> dict:
     return {
         "id": str(doc.id), "name": doc.name, "sha256": doc.sha256,
         "mime": doc.mime, "status": doc.status, "version": doc.version,
+        "size_bytes": doc.size_bytes,
         "page_count": doc.page_count, "year": doc.year,
         "metadata": doc.metadata_,
         "created_at": doc.created_at.isoformat() if doc.created_at else "",
@@ -128,6 +131,7 @@ async def upload_document(
     # 4. 去重
     existing = await check_duplicate(sha256, db_session=session)
     if existing:
+        delete_stored_file(file_path)
         return JSONResponse(
             status_code=200,
             content={"state": "duplicate", "duplicate": existing},
@@ -136,21 +140,27 @@ async def upload_document(
     # 5. 创建文档记录
     from apps.api.db.models.document import Document
     now = datetime.now(UTC).replace(tzinfo=None)
-    doc = Document(
-        name=filename, sha256=sha256, mime=content_type, status="pending",
-        version=1, file_path=file_path, created_at=now, updated_at=now,
-    )
-    session.add(doc)
-    await session.flush()
+    try:
+        doc = Document(
+            name=filename, sha256=sha256, mime=content_type,
+            storage_name=Path(file_path).name, size_bytes=size, status="pending",
+            version=1, created_at=now, updated_at=now,
+        )
+        session.add(doc)
+        await session.flush()
 
-    # 6. 创建导入任务并入队
-    job = IngestionJob(
-        document_id=doc.id, stage="validate", status="pending",
-        progress=0.0, attempts=0, created_at=now, updated_at=now,
-    )
-    session.add(job)
-    await session.flush()
-    await session.commit()
+        # 6. 创建导入任务并入队
+        job = IngestionJob(
+            document_id=doc.id, stage="validate", status="pending",
+            progress=0.0, attempts=0, created_at=now, updated_at=now,
+        )
+        session.add(job)
+        await session.flush()
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        delete_stored_file(file_path)
+        raise
 
     return JSONResponse(
         status_code=201,

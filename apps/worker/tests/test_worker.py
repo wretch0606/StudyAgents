@@ -115,6 +115,15 @@ def test_list_registered() -> None:
     assert "ingestion" in registry.list_registered()
 
 
+def test_default_registry_covers_ingestion_stages() -> None:
+    """生产启动时所有持久化阶段都有真实处理器。"""
+    from apps.api.db.models.ingestion_job import VALID_STAGES
+    from apps.worker.main import build_default_registry
+
+    registry = build_default_registry()
+    assert set(registry.list_registered()) == VALID_STAGES
+
+
 # ============================================================
 # Worker 任务执行
 # ============================================================

@@ -108,7 +108,7 @@ class AgentEventSink:
             event_type=event.event_type,
             status=event.status,
             summary=event.summary,
-            source_refs=event.source_refs,
+            source_refs=[ref.model_dump() for ref in event.source_refs],
             duration_ms=event.duration_ms,
         )
         await db_session.commit()

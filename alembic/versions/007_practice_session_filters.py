@@ -1,7 +1,7 @@
 """Add filters and target_count columns to practice_sessions.
 
-Revision ID: 006
-Revises: 005
+Revision ID: 007
+Revises: 006
 Create Date: 2026-07-28
 """
 
@@ -13,8 +13,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "006"
-down_revision: str | None = "005"
+revision: str = "007"
+down_revision: str | None = "006"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

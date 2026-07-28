@@ -1,19 +1,36 @@
 # 团队名册
 
-由成员 A 在邀请协作者后补全。
+本文件记录 StudyAgents 五人小组的角色、GitHub 身份与代码责任边界。成员姓名暂未登记，当前以 GitHub 用户名作为协作标识。
 
-| 角色 | 姓名 | GitHub 用户名 | 主责目录 | 状态 |
+| 角色 | GitHub 用户名 | 主责 | 主责目录 | 仓库状态 |
 | --- | --- | --- | --- | --- |
-| A | 待填写 | @待填写 | `docs/`、`tests/evaluation/` | 组长 |
-| B | 待填写 | @待填写 | `packages/retrieval/`、`apps/worker/` | 待邀请 |
-| C | 待填写 | @待填写 | `packages/agents/`、`contracts/` | 待邀请 |
-| D | 待填写 | @待填写 | `apps/api/`、部署文件 | 待邀请 |
-| E | 待填写 | @待填写 | `apps/frontend/`、E2E | 待邀请 |
+| A | @wretch0606 | 组长、产品、测试、文档与集成验收 | `docs/`、`tests/evaluation/` | 已加入（仓库管理员） |
+| B | @ssf13546 | 文档解析、OCR、RAG、检索与引用 | `packages/retrieval/`、`apps/worker/` | 已加入 |
+| C | @my-mayun | LangGraph、多 Agent、提示词与契约 | `packages/agents/`、`contracts/` | 已加入 |
+| D | @DriOvO | 后端、数据库、API、部署与备份 | `apps/api/`、部署文件 | 已加入 |
+| E | @gmr11d4j7i | Vue 前端、交互、SSE 与 E2E | `apps/frontend/`、E2E | 已加入 |
+
+## 固定交叉评审
+
+| 评审人 | 被评审角色 | 评审重点 |
+| --- | --- | --- |
+| A | E | 用户流程、验收标准与前端体验 |
+| B | C | 检索上下文、引用来源与 Agent 输入质量 |
+| C | D | Agent 编排与 API、数据契约的衔接 |
+| D | B | 后端接口、任务队列与检索服务的衔接 |
+| E | A | 用户故事、验收用例与可演示性 |
 
 ## 邀请后检查
 
-- 五人均能访问仓库。
-- 每人已在本机配置 Git 身份。
-- 每人已阅读 `README.md` 与 `CONTRIBUTING.md`。
-- 每人已认领自己的首个 Issue。
-- 保护 `main` 分支，要求 Pull Request 和至少一名批准者。
+- [x] A、B、C、D、E 已能访问仓库。
+- [ ] 每人已在本机配置 Git 身份。
+- [ ] 每人已阅读 `README.md` 与 `CONTRIBUTING.md`。
+- [x] 每人已认领自己的首个 Issue。
+- [x] `main` 分支已受保护，要求 Pull Request 和至少一名批准者。
+
+## 协作约定
+
+- 每位成员除主责代码外，也负责对应模块的测试与说明文档。
+- 涉及跨模块的数据结构变更时，先更新 `contracts/`，再同步代码与 Mock。
+- 合并前由固定交叉评审人进行审查；涉及多个模块时追加相关模块负责人。
+- A 负责排期、风险跟踪、集成验收与最终演示，不替代各模块负责人的实现责任。

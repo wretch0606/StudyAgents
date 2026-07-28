@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/schemas/evaluation-result.schema.json",
+  "title": "StudyAgentsEvaluationResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "case_id",
+    "actual_behavior",
+    "retrieved_evidence",
+    "latency_ms",
+    "trace_id"
+  ],
+  "properties": {
+    "case_id": {"type": "string", "pattern": "^db-[0-9]{3}$"},
+    "actual_behavior": {
+      "enum": ["answer", "refuse", "clarify", "flag_conflict", "grade", "error"]
+    },
+    "retrieved_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["document_id", "page", "rank"],
+        "properties": {
+          "document_id": {"type": "string"},
+          "page": {"type": "integer", "minimum": 1},
+          "rank": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "latency_ms": {"type": "number", "minimum": 0},
+    "trace_id": {"type": "string", "minLength": 1}
+  }
+}

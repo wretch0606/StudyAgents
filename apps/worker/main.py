@@ -34,6 +34,18 @@ from apps.worker.pipeline import (  # noqa: E402
 logger = logging.getLogger("worker")
 
 
+def build_default_registry() -> HandlerRegistry:
+    """注册一周冲刺版真实导入处理器。"""
+    from apps.api.db.models.ingestion_job import VALID_STAGES
+    from apps.worker.ingestion_adapter import IngestionPipelineHandler
+
+    registry = HandlerRegistry()
+    handler = IngestionPipelineHandler()
+    for stage in VALID_STAGES:
+        registry.register(stage, handler)
+    return registry
+
+
 # ============================================================
 # 健康检查
 # ============================================================
@@ -154,30 +166,46 @@ class Worker:
             # 执行任务（独立事务，避免长事务）
             async with session_context() as db_session:
                 # 重新加载 job
+                from apps.api.db.models.document import Document
                 from apps.api.db.models.ingestion_job import IngestionJob
                 result = await db_session.execute(
-                    __import__("sqlalchemy").select(IngestionJob).where(
-                        IngestionJob.id == job.id
-                    )
+                    __import__("sqlalchemy")
+                    .select(IngestionJob, Document)
+                    .join(Document, Document.id == IngestionJob.document_id)
+                    .where(IngestionJob.id == job.id)
                 )
-                job = result.scalar_one()
+                job, document = result.one()
 
                 try:
                     # 通过 B 适配器执行阶段
                     if self.registry.list_registered():
+                        from apps.api.services.file_storage import resolve_storage_path
+
+                        payload = {
+                            "document_id": str(job.document_id),
+                            "document_name": document.name,
+                        }
+                        if document.storage_name:
+                            payload["file_path"] = str(
+                                resolve_storage_path(document.storage_name)
+                            )
                         task = WorkerTask(
                             task_id=str(job.id),
                             task_type=job.stage,
-                            payload={"document_id": str(job.document_id)},
+                            payload=payload,
                         )
                         worker_result = await self.execute_task(task)
                         if worker_result.success:
                             await complete_job(db_session, job)
+                            document.status = "active"
                         else:
                             await fail_job(
                                 db_session, job,
                                 RuntimeError(worker_result.error_message or "unknown"),
+                                retryable=worker_result.retryable,
                             )
+                            job.error_code = worker_result.error_code or job.error_code
+                            document.status = "failed"
                     else:
                         # 无处理器：标记为可重试（等待 B 接入）
                         await update_progress(
@@ -259,13 +287,7 @@ async def _run_main(check_only: bool, database_url: str = "") -> None:
     """主入口。"""
     setup_logging()
 
-    registry = HandlerRegistry()
-
-    # 注册入库任务处理器
-    from apps.worker.ingestion.pipeline import IngestionPipeline, IngestionHandler
-    ingestion_handler = IngestionHandler()
-    registry.register("validate", ingestion_handler)
-
+    registry = build_default_registry()
     worker = Worker(registry)
 
     if check_only:

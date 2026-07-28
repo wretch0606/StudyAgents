@@ -168,6 +168,27 @@ def save_file(source, *, filename: str) -> tuple[str, str, int]:
     return str(final_path), sha256, total
 
 
+def resolve_storage_path(storage_name: str) -> Path:
+    """将数据库中的存储文件名解析为受控目录下的绝对路径。"""
+    if not storage_name or Path(storage_name).name != storage_name:
+        raise FileValidationError("FILE_STORAGE_INVALID", "非法的存储文件名")
+
+    files_dir = Path(settings.files_root).resolve()
+    file_path = (files_dir / storage_name).resolve()
+    if file_path.parent != files_dir:
+        raise FileValidationError("FILE_STORAGE_INVALID", "存储路径越界")
+    return file_path
+
+
+def delete_stored_file(file_path: str | Path) -> None:
+    """删除 save_file 创建的文件；拒绝删除存储目录之外的路径。"""
+    files_dir = Path(settings.files_root).resolve()
+    target = Path(file_path).resolve()
+    if target.parent != files_dir:
+        raise FileValidationError("FILE_STORAGE_INVALID", "拒绝删除存储目录之外的文件")
+    target.unlink(missing_ok=True)
+
+
 # ---- 去重 ----
 
 async def check_duplicate(sha256: str, *, db_session) -> dict | None:

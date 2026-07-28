@@ -1,7 +1,7 @@
-"""004: Chat persistence — chat_sessions, chat_messages, AgentRun extensions.
+"""005: Chat persistence — chat_sessions, chat_messages, AgentRun extensions.
 
-Revision ID: 004
-Revises: 003
+Revision ID: 005
+Revises: 004
 Create Date: 2026-07-27
 
 Creates:
@@ -20,8 +20,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "004"
-down_revision: str | None = "003"
+revision: str = "005"
+down_revision: str | None = "004"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from apps.api.services.event_types import AgentEventType
 
@@ -25,7 +25,7 @@ MAX_PAGE_IMAGE_URL_LENGTH = 512
 class SourceRef(BaseModel):
     """source_refs 中单个元素的严格 Schema — 禁止私有字段注入和全文通道绕过。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     document_id: str = Field(
         min_length=1, max_length=MAX_DOC_ID_LENGTH,
@@ -35,8 +35,10 @@ class SourceRef(BaseModel):
         default="", max_length=MAX_DOC_NAME_LENGTH,
         description="资料名",
     )
-    page_no: int | None = Field(
-        default=None, ge=1,
+    page_number: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("page_number", "page_no"),
         description="页码（从 1 开始）",
     )
     question_no: str | None = Field(
@@ -55,6 +57,13 @@ class SourceRef(BaseModel):
         default=None, max_length=MAX_PAGE_IMAGE_URL_LENGTH,
         description="页图 URL",
     )
+    score: float = Field(default=0.0, description="检索融合分数")
+
+    @property
+    def page_no(self) -> int | None:
+        """兼容旧后端调用；公开序列化统一使用 page_number。"""
+        return self.page_number
+
 
 # ---- C 提交的事件草稿 ----
 

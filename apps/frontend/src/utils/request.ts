@@ -100,6 +100,27 @@ export function clearCsrfToken(): void {
   csrfToken = null
 }
 
+// ============================================================
+// 2b. Bearer Token（JWT，持久化到 localStorage）
+// ============================================================
+
+let bearerToken: string | null = null
+
+/** 手动写入 Bearer Token（登录成功后调用） */
+export function setBearerToken(token: string): void {
+  bearerToken = token
+}
+
+/** 读取当前内存中的 Bearer Token */
+export function getBearerToken(): string | null {
+  return bearerToken
+}
+
+/** 清除 Bearer Token（登出 / 会话过期时调用） */
+export function clearBearerToken(): void {
+  bearerToken = null
+}
+
 /**
  * 从后端获取 CSRF Token 并存入内存。
  * 应用启动、页面刷新、Token 失效恢复时调用。
@@ -215,6 +236,11 @@ http.interceptors.request.use(
     // --- 6.1 CSRF Token ---
     if (csrfToken && config.headers) {
       config.headers['X-CSRF-Token'] = csrfToken
+    }
+
+    // --- 6.1b Bearer Token (JWT) ---
+    if (bearerToken && config.headers) {
+      config.headers['Authorization'] = `Bearer ${bearerToken}`
     }
 
     // --- 6.2 幂等键 ---

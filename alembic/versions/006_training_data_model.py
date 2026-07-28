@@ -1,7 +1,7 @@
-"""005: Training data model — practice sessions, items, answers, grading, mastery.
+"""006: Training data model — practice sessions, items, answers, grading, mastery.
 
-Revision ID: 005
-Revises: 004
+Revision ID: 006
+Revises: 005
 Create Date: 2026-07-28
 
 Creates:
@@ -21,8 +21,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "005"
-down_revision: str | None = "004"
+revision: str = "006"
+down_revision: str | None = "005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -13,7 +13,10 @@ B 职责：解析、OCR、切块、向量化、索引、检索。
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
+
+from apps.worker.pipeline import WorkerResult, WorkerTask
 
 # ---- 适配器协议 ----
 
@@ -57,6 +60,109 @@ class IngestionAdapter(Protocol):
     async def get_job(self, job_id: str):
         """查询单个任务，返回 IngestionJob | None。"""
         ...
+
+
+class PipelineProgressRecorder:
+    """让 B 管线复用 D 的任务生命周期，同时记录阶段内诊断信息。"""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+        self.last_error: str | None = None
+
+    async def update_progress(
+        self, job_id: str, stage, progress: float, error: str | None = None,
+    ) -> None:
+        self.events.append({
+            "job_id": job_id,
+            "stage": stage.value if hasattr(stage, "value") else str(stage),
+            "progress": progress,
+            "detail": error,
+        })
+
+    async def complete_job(self, job_id: str) -> None:
+        self.events.append({"job_id": job_id, "stage": "complete", "progress": 100.0})
+
+    async def fail_job(self, job_id: str, error: str, retryable: bool = True) -> None:
+        self.last_error = error
+        self.events.append({
+            "job_id": job_id,
+            "stage": "failed",
+            "progress": 0.0,
+            "detail": error,
+            "retryable": retryable,
+        })
+
+
+class IngestionPipelineHandler:
+    """把 D 的 WorkerTask 转换为 B 的完整导入管线调用。"""
+
+    def __init__(self, pipeline=None) -> None:
+        if pipeline is None:
+            from apps.worker.ingestion.pipeline import IngestionPipeline
+
+            pipeline = IngestionPipeline(PipelineProgressRecorder())
+        self.pipeline = pipeline
+
+    async def handle(self, task: WorkerTask) -> WorkerResult:
+        from apps.worker.schemas import IngestionJob, IngestionStage, IngestionStatus
+
+        document_id = str(task.payload.get("document_id", ""))
+        file_path = str(task.payload.get("file_path", ""))
+        if not document_id:
+            return WorkerResult(
+                task_id=task.task_id,
+                success=False,
+                error_code="DOCUMENT_ID_MISSING",
+                error_message="任务缺少 document_id",
+                retryable=False,
+            )
+        if not file_path or not Path(file_path).is_file():
+            return WorkerResult(
+                task_id=task.task_id,
+                success=False,
+                error_code="SOURCE_FILE_NOT_FOUND",
+                error_message=f"导入源文件不存在: {file_path or '<empty>'}",
+                retryable=False,
+            )
+        if Path(file_path).suffix.lower() != ".pdf":
+            return WorkerResult(
+                task_id=task.task_id,
+                success=False,
+                error_code="PIPELINE_UNSUPPORTED_TYPE",
+                error_message="当前一周冲刺版导入管线仅支持 PDF",
+                retryable=False,
+            )
+
+        job = IngestionJob(
+            job_id=task.task_id,
+            document_id=document_id,
+            stage=IngestionStage.VALIDATING,
+            status=IngestionStatus.RUNNING,
+        )
+        try:
+            await self.pipeline.run_to_completion(job, file_path)
+        except (FileNotFoundError, ValueError) as exc:
+            return WorkerResult(
+                task_id=task.task_id,
+                success=False,
+                error_code=type(exc).__name__.upper(),
+                error_message=str(exc),
+                retryable=False,
+            )
+        except Exception as exc:
+            return WorkerResult(
+                task_id=task.task_id,
+                success=False,
+                error_code="INGESTION_FAILED",
+                error_message=str(exc)[:500],
+                retryable=True,
+            )
+
+        return WorkerResult(
+            task_id=task.task_id,
+            success=True,
+            output={"document_id": document_id, "stage": "complete"},
+        )
 
 
 # ---- Fake 适配器（测试用） ----

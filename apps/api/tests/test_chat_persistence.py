@@ -123,24 +123,24 @@ def test_agent_events_unique_constraint() -> None:
 # 2. Migration tests (no DB needed)
 # ============================================================
 
-def test_migration_004_importable() -> None:
-    """Verify migration 004 file exists and has upgrade/downgrade/revision."""
+def test_migration_005_importable() -> None:
+    """Verify chat migration follows document storage in the unified chain."""
     from importlib import util as import_util
 
-    mf = _project_root / "alembic" / "versions" / "004_chat_persistence.py"
+    mf = _project_root / "alembic" / "versions" / "005_chat_persistence.py"
     assert mf.exists(), f"Migration file not found: {mf}"
 
-    spec = import_util.spec_from_file_location("migration_004", mf)
+    spec = import_util.spec_from_file_location("migration_005_chat", mf)
     assert spec is not None
     mod = import_util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
-    assert hasattr(mod, "upgrade"), "Migration 004 missing upgrade()"
-    assert hasattr(mod, "downgrade"), "Migration 004 missing downgrade()"
-    assert hasattr(mod, "revision"), "Migration 004 missing revision"
-    assert mod.revision == "004"
-    assert mod.down_revision == "003"
+    assert hasattr(mod, "upgrade"), "Migration 005 missing upgrade()"
+    assert hasattr(mod, "downgrade"), "Migration 005 missing downgrade()"
+    assert hasattr(mod, "revision"), "Migration 005 missing revision"
+    assert mod.revision == "005"
+    assert mod.down_revision == "004"
 
 
 # ============================================================

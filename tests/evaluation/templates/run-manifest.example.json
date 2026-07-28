@@ -1,0 +1,32 @@
+{
+  "run_id": "replace-with-unique-run-id",
+  "created_at": "2026-07-27T00:00:00+08:00",
+  "code_commit": "replace-with-40-character-git-commit",
+  "material_commit": "bbb111f2241211c9037afbfa9829216d04d34eaa",
+  "material_manifest_sha256": "replace-with-local-manifest-sha256",
+  "dataset_sha256": "45a417e4eaff6f44b9fb01d006b0e5d08a52c89052d08e70f44be7c1a0ce5863",
+  "policy_sha256": "d880cf7eaf7c615e04d949437e993cc7a84d03eb29c9ff41843f48b234ba06a0",
+  "models": {
+    "embedding": "replace-with-provider-and-model",
+    "answer": "replace-with-provider-and-model",
+    "vision": "replace-with-provider-and-model",
+    "grading": "replace-with-provider-and-model"
+  },
+  "prompt_versions": {
+    "coordinator": "replace-with-file-and-commit",
+    "knowledge": "replace-with-file-and-commit",
+    "exam": "replace-with-file-and-commit",
+    "grading": "replace-with-file-and-commit"
+  },
+  "retrieval_parameters": {
+    "vector_k": 20,
+    "keyword_k": 20,
+    "final_k": 8,
+    "report_k": 5,
+    "rrf_k": 60
+  },
+  "environment": {
+    "mode": "integration",
+    "notes": "Do not include secrets or absolute local paths."
+  }
+}
