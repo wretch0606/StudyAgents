@@ -16,9 +16,9 @@ from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from worker.config import LEASE_DURATION
-from worker.db.models import IngestionJob as IngestionJobModel
-from worker.schemas import IngestionJob, IngestionStage, IngestionStatus
+from apps.worker.config import LEASE_DURATION
+from apps.worker.db.models import IngestionJob as IngestionJobModel
+from apps.worker.schemas import IngestionJob, IngestionStage, IngestionStatus
 
 logger = logging.getLogger(__name__)
 

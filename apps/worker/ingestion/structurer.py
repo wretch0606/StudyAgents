@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Optional
 
-from worker.schemas import (
+from apps.worker.schemas import (
     BlockType,
     FigureBlock,
     LayoutBlock,

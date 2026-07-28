@@ -7,7 +7,7 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from worker.config import ASYNC_DATABASE_URL, DEBUG
+from apps.worker.config import ASYNC_DATABASE_URL, DEBUG
 
 # 异步引擎
 engine = create_async_engine(

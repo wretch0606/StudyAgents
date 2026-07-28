@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass, field
 
-from worker.schemas import EvidenceSufficiency, SourceRef
+from apps.worker.schemas import EvidenceSufficiency, SourceRef
 
 
 @dataclass

@@ -11,7 +11,7 @@ from typing import Optional
 
 import numpy as np
 
-from worker.schemas import RetrievalFilters
+from apps.worker.schemas import RetrievalFilters
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@
 import logging
 from typing import Optional
 
-from worker.retrieval.keyword_search import tokenize_chinese, InMemoryKeywordBackend
+from apps.worker.retrieval.keyword_search import tokenize_chinese, InMemoryKeywordBackend
 
 logger = logging.getLogger(__name__)
 

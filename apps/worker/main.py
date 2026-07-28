@@ -1,103 +1,339 @@
-"""
-Worker 入口
+"""Worker 进程入口。
 
-职责：
-  1. 启动时恢复过期任务
-  2. 轮询 ingestion_jobs 表中 pending 任务
-  3. 使用 SELECT ... FOR UPDATE SKIP LOCKED 获取任务
-  4. 按阶段分派处理，持久化进度
-  5. 发送心跳维持租约
+启动:  uv run python -m apps.worker.main
+检查:  uv run python -m apps.worker.main --check
+停止:  SIGINT / SIGTERM
+
+生命周期：启动→加载配置→日志初始化→DB连接检查→注册处理器→运行/轮询→优雅停止。
 """
 
+from __future__ import annotations
+
+import argparse
 import asyncio
 import logging
 import signal
 import sys
-from worker.config import (
-    WORKER_POLL_INTERVAL,
-    WORKER_HEARTBEAT,
-    ensure_dirs,
-)
-from worker.db.session import async_session_factory
-from worker.ingestion.job_manager import JobManager
+from pathlib import Path
 
-# 日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+# 确保项目根在 Python path
+_project_root = Path(__file__).resolve().parents[2]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from apps.api.config import settings  # noqa: E402
+from apps.api.middleware.logging import setup_logging  # noqa: E402
+from apps.worker.health import HealthReport, WorkerStatus  # noqa: E402
+from apps.worker.pipeline import (  # noqa: E402
+    HandlerNotConfiguredError,
+    HandlerRegistry,
+    WorkerResult,
+    WorkerTask,
 )
+
 logger = logging.getLogger("worker")
 
-# 优雅退出标志
-_shutdown = False
 
+def build_default_registry() -> HandlerRegistry:
+    """注册一周冲刺版真实导入处理器。"""
+    from apps.api.db.models.ingestion_job import VALID_STAGES
+    from apps.worker.ingestion_adapter import IngestionPipelineHandler
 
-def _handle_signal(signum, frame):
-    global _shutdown
-    logger.info(f"收到信号 {signum}，准备退出...")
-    _shutdown = True
+    registry = HandlerRegistry()
+    handler = IngestionPipelineHandler()
+    for stage in VALID_STAGES:
+        registry.register(stage, handler)
+    return registry
 
 
 # ============================================================
-# 主循环
+# 健康检查
 # ============================================================
 
-async def main():
-    """Worker 主循环"""
-    ensure_dirs()
+async def _check_health() -> HealthReport:
+    """执行健康检查，返回报告。"""
+    report = HealthReport()
+    report.status = WorkerStatus.starting
 
-    # 注册信号处理
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    # 1. 配置检查
+    if settings.database_url:
+        report.add_check("config", True)
+    else:
+        report.add_check("config", False, "DATABASE_URL not configured")
 
-    logger.info("Worker 启动，正在恢复过期任务...")
+    # 2. 数据库连接
+    try:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
 
-    async with async_session_factory() as session:
-        job_mgr = JobManager(session)
-        recovered = await job_mgr.recover_stale_jobs()
-        if recovered:
-            logger.info(f"已恢复 {recovered} 个过期任务")
-        await session.commit()
+        from apps.api.db.session import _build_async_url
 
-    logger.info(f"开始轮询，间隔 {WORKER_POLL_INTERVAL}s")
+        url = _build_async_url()
+        engine = create_async_engine(url)
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        await engine.dispose()
+        report.add_check("database", True)
+    except Exception as exc:
+        report.add_check("database", False, type(exc).__name__)
 
-    last_heartbeat = 0
-    iteration = 0
+    if report.all_ok():
+        report.status = WorkerStatus.ready
+    else:
+        report.status = WorkerStatus.degraded
 
-    while not _shutdown:
+    return report
+
+
+# ============================================================
+# 运行循环
+# ============================================================
+
+class Worker:
+    """Worker 实例 — 管理生命周期和任务调度。"""
+
+    POLL_INTERVAL = 5.0  # 任务轮询间隔（秒）
+
+    def __init__(self, registry: HandlerRegistry) -> None:
+        self.registry = registry
+        self._stop_event = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        """启动 Worker：检查 DB，确认处理器状态，开始轮询。"""
+        logger.info("worker starting")
+        report = await _check_health()
+        logger.info("health: %s", report.summary())
+
+        registered = self.registry.list_registered()
+        if registered:
+            logger.info("registered handlers: %s", registered)
+        else:
+            logger.warning("no handlers registered — worker will reject all tasks")
+
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self._run_loop())
+
+    async def _run_loop(self) -> None:
+        """主循环：轮询 DB 中的 pending ingestion_jobs，处理并更新状态。"""
+        logger.info("run loop started (poll_interval=%.1fs)", self.POLL_INTERVAL)
+        while not self._stop_event.is_set():
+            try:
+                await self._process_pending_jobs()
+                await asyncio.sleep(self.POLL_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("run loop iteration error")
+                await asyncio.sleep(self.POLL_INTERVAL)
+        logger.info("run loop exited")
+
+    async def _process_pending_jobs(self) -> None:
+        """使用租约获取 pending 任务，通过 B 适配器执行并持久化。
+
+        Issue #11：SELECT FOR UPDATE SKIP LOCKED + 重试 + 恢复。
+        """
+        from apps.api.db.session import session_context
+        from apps.worker.services.job_service import (
+            claim_next_job,
+            complete_job,
+            fail_job,
+            recover_stale_jobs,
+            update_progress,
+        )
+
         try:
-            async with async_session_factory() as session:
-                job_mgr = JobManager(session)
+            async with session_context() as db_session:
+                # 恢复过期任务
+                recovered = await recover_stale_jobs(db_session)
+                if recovered:
+                    logger.info("recovered %d stale jobs", recovered)
+                await db_session.commit()
 
-                # 心跳
-                if iteration - last_heartbeat >= WORKER_HEARTBEAT // WORKER_POLL_INTERVAL:
-                    await job_mgr.send_heartbeat()
-                    last_heartbeat = iteration
-
-                # 获取待处理任务
-                job = await job_mgr.claim_next()
+            async with session_context() as db_session:
+                # 领取任务（带锁）
+                job = await claim_next_job(db_session)
                 if job is None:
-                    await session.commit()
-                    await asyncio.sleep(WORKER_POLL_INTERVAL)
-                    iteration += 1
-                    continue
+                    await db_session.commit()
+                    return
 
-                logger.info(f"获取任务 {job.job_id}，阶段 {job.stage.value}")
+                logger.info(
+                    "claimed job %s doc=%s attempt=%d",
+                    job.id, job.document_id, job.attempts,
+                )
+                await db_session.commit()
 
-                # TODO Day 2：在此调用 pipeline 按阶段处理
-                # from worker.ingestion.pipeline import process_job
-                # await process_job(job)
+            # 执行任务（独立事务，避免长事务）
+            async with session_context() as db_session:
+                # 重新加载 job
+                from apps.api.db.models.document import Document
+                from apps.api.db.models.ingestion_job import IngestionJob
+                result = await db_session.execute(
+                    __import__("sqlalchemy")
+                    .select(IngestionJob, Document)
+                    .join(Document, Document.id == IngestionJob.document_id)
+                    .where(IngestionJob.id == job.id)
+                )
+                job, document = result.one()
 
-                await session.commit()
+                try:
+                    # 通过 B 适配器执行阶段
+                    if self.registry.list_registered():
+                        from apps.api.services.file_storage import resolve_storage_path
 
-        except Exception as e:
-            logger.error(f"主循环异常: {e}", exc_info=True)
+                        payload = {
+                            "document_id": str(job.document_id),
+                            "document_name": document.name,
+                        }
+                        if document.storage_name:
+                            payload["file_path"] = str(
+                                resolve_storage_path(document.storage_name)
+                            )
+                        task = WorkerTask(
+                            task_id=str(job.id),
+                            task_type=job.stage,
+                            payload=payload,
+                        )
+                        worker_result = await self.execute_task(task)
+                        if worker_result.success:
+                            await complete_job(db_session, job)
+                            document.status = "active"
+                        else:
+                            await fail_job(
+                                db_session, job,
+                                RuntimeError(worker_result.error_message or "unknown"),
+                                retryable=worker_result.retryable,
+                            )
+                            job.error_code = worker_result.error_code or job.error_code
+                            document.status = "failed"
+                    else:
+                        # 无处理器：标记为可重试（等待 B 接入）
+                        await update_progress(
+                            db_session, job, job.stage, job.progress,
+                            error_code="NO_HANDLER",
+                            error_summary="handler_not_configured",
+                        )
+                        await fail_job(
+                            db_session, job,
+                            RuntimeError("handler_not_configured"),
+                            retryable=True,
+                        )
+                except Exception as exc:
+                    await fail_job(db_session, job, exc)
+                    logger.exception("job %s failed", job.id)
 
-        iteration += 1
-        await asyncio.sleep(WORKER_POLL_INTERVAL)
+                await db_session.commit()
 
-    logger.info("Worker 已退出")
+        except Exception:
+            logger.exception("failed to process pending jobs")
+
+    async def execute_task(self, task: WorkerTask) -> WorkerResult:
+        """执行单个任务：路由到已注册的处理器。
+
+        由外部任务源（Issue #11）调用。
+        """
+        handler = self.registry.get(task.task_type)
+        if handler is None:
+            raise HandlerNotConfiguredError(task.task_type)
+
+        logger.info("task started: id=%s type=%s", task.task_id, task.task_type)
+        try:
+            result = await handler.handle(task)
+            if result.success:
+                logger.info("task succeeded: id=%s", task.task_id)
+            else:
+                logger.warning(
+                    "task failed: id=%s code=%s msg=%s",
+                    task.task_id, result.error_code, result.error_message,
+                )
+            return result
+        except Exception as exc:
+            logger.exception("task exception: id=%s", task.task_id)
+            return WorkerResult(
+                task_id=task.task_id,
+                success=False,
+                error_code="HANDLER_EXCEPTION",
+                error_message=str(exc)[:500],
+            )
+
+    async def stop(self) -> None:
+        """优雅停止：发送停止信号，等待当前轮询退出。"""
+        logger.info("worker stopping")
+        self._stop_event.set()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("worker stopped")
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def _setup_signal_handlers(worker: Worker, loop: asyncio.AbstractEventLoop) -> None:
+    """注册 SIGINT/SIGTERM 处理器。"""
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(worker.stop()))
+        except NotImplementedError:
+            # Windows 不支持 add_signal_handler
+            pass
+
+
+async def _run_main(check_only: bool, database_url: str = "") -> None:
+    """主入口。"""
+    setup_logging()
+
+    registry = build_default_registry()
+    worker = Worker(registry)
+
+    if check_only:
+        report = await _check_health()
+        print(report.summary())
+        if report.all_ok():
+            logger.info("health check: all OK")
+        else:
+            logger.error("health check: failures detected")
+            sys.exit(1)
+        return
+
+    await worker.start()
+    logger.info("worker ready — press Ctrl+C to stop")
+
+    # Windows 兼容：使用 asyncio.Event 等待
+    stop_event = asyncio.Event()
+
+    def _stop():
+        asyncio.create_task(worker.stop())
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    _setup_signal_handlers(worker, loop)
+    # 后备：KeyboardInterrupt
+    try:
+        await stop_event.wait()
+    except KeyboardInterrupt:
+        logger.info("keyboard interrupt received")
+    finally:
+        await worker.stop()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="StudyAgents Worker")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Run health check and exit (non-zero if unhealthy).",
+    )
+    args = parser.parse_args()
+
+    try:
+        asyncio.run(_run_main(check_only=args.check))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

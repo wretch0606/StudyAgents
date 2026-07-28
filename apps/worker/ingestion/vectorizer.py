@@ -9,7 +9,7 @@ import logging
 import math
 from typing import Optional
 
-from worker.config import EMBEDDING_API_BASE, EMBEDDING_API_KEY, EMBEDDING_MODEL
+from apps.worker.config import EMBEDDING_API_BASE, EMBEDDING_API_KEY, EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from worker.schemas import (
+from apps.worker.schemas import (
     ExamQuestion,
     PageResult,
     ReviewItem,

@@ -8,7 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from worker.schemas import (
+from apps.worker.schemas import (
     ALLOWED_EXTENSIONS,
     DEFAULT_MAX_UPLOAD_MB,
     MAGIC_SIGNATURES,
