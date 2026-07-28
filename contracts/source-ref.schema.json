@@ -1,16 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://studyagents.local/schemas/source-ref.schema.json",
+  "$id": "https://studyagents.local/contracts/source-ref.schema.json",
   "title": "SourceRef",
   "description": "B 提供：指向原始资料的可引用证据。检索后由知识 Agent 消费。",
   "type": "object",
-  "additionalProperties": false,
   "required": [
     "document_id",
     "document_name",
     "page_number",
     "chunk_id",
-    "excerpt"
+    "excerpt",
+    "score"
   ],
   "properties": {
     "document_id": {
@@ -51,5 +51,6 @@
       "minimum": 0,
       "description": "RRF 融合分数，越高越相关。典型值 0.005–0.033"
     }
-  }
+  },
+  "additionalProperties": false
 }
