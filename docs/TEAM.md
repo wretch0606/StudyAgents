@@ -7,7 +7,7 @@
 | A | @wretch0606 | 组长、产品、测试、文档与集成验收 | `docs/`、`tests/evaluation/` | 已加入（仓库管理员） |
 | B | @ssf13546 | 文档解析、OCR、RAG、检索与引用 | `packages/retrieval/`、`apps/worker/` | 已加入 |
 | C | @my-mayun | LangGraph、多 Agent、提示词与契约 | `packages/agents/`、`contracts/` | 已加入 |
-| D | 待补充 | 后端、数据库、API、部署与备份 | `apps/api/`、部署文件 | 待加入 |
+| D | @DriOvO | 后端、数据库、API、部署与备份 | `apps/api/`、部署文件 | 已加入 |
 | E | @gmr11d4j7i | Vue 前端、交互、SSE 与 E2E | `apps/frontend/`、E2E | 已加入 |
 
 ## 固定交叉评审
@@ -22,11 +22,10 @@
 
 ## 邀请后检查
 
-- [x] A、B、C、E 已能访问仓库。
-- [ ] D 加入仓库并接受协作者邀请。
+- [x] A、B、C、D、E 已能访问仓库。
 - [ ] 每人已在本机配置 Git 身份。
 - [ ] 每人已阅读 `README.md` 与 `CONTRIBUTING.md`。
-- [ ] 每人已认领自己的首个 Issue。
+- [x] 每人已认领自己的首个 Issue。
 - [x] `main` 分支已受保护，要求 Pull Request 和至少一名批准者。
 
 ## 协作约定
