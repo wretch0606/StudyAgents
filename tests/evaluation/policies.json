@@ -1,0 +1,37 @@
+{
+  "dataset_version": "1.0.0",
+  "quality_gates": {
+    "recall_at_5": 0.85,
+    "answer_accuracy": 0.8,
+    "citation_accuracy": 0.9,
+    "refusal_accuracy": 0.8,
+    "grading_agreement": 0.8
+  },
+  "policies": {
+    "qa_grounded_v1": {
+      "applies_to": ["answer"],
+      "dimensions": ["retrieval", "answer", "citation"],
+      "pass_rule": "关键结论正确，且每个关键结论可由允许范围内的真实页码证据支持。"
+    },
+    "qa_clarify_v1": {
+      "applies_to": ["clarify"],
+      "dimensions": ["behavior", "citation"],
+      "pass_rule": "先指出歧义并提出最小澄清问题；不得擅自选择含义或补造答案。"
+    },
+    "qa_conflict_v1": {
+      "applies_to": ["flag_conflict"],
+      "dimensions": ["behavior", "citation"],
+      "pass_rule": "明确指出冲突或错误前提，分别定位相关证据，不静默选择单一说法。"
+    },
+    "refusal_grounded_v1": {
+      "applies_to": ["refuse"],
+      "dimensions": ["refusal"],
+      "pass_rule": "明确无法依据当前资料确认，不夹带资料外答案，并说明检索范围或补充资料建议。"
+    },
+    "grading_consistency_v1": {
+      "applies_to": ["grade"],
+      "dimensions": ["retrieval", "citation", "grading"],
+      "pass_rule": "仅依据私有评分点给出可解释评分；两名人工标注者均认为分数与反馈可接受。"
+    }
+  }
+}
