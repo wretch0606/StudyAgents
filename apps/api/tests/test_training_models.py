@@ -155,7 +155,6 @@ def test_migration_005_upgrade_downgrade_cycle() -> None:
         native_url = native_url.replace(prefix, "")
 
     env = {**__import__("os").environ, "DATABASE_URL": native_url}
-    alembic_dir = str(_project_root / "alembic")
 
     def _run(cmd: list[str]) -> None:
         result = subprocess.run(
