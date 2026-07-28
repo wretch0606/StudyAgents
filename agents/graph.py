@@ -9,70 +9,51 @@ LangGraph 固定状态图，对应开发文档 6.3 节（图 4）。
                           │             └─ no  → refusal → END
                           └─ (error) → error_handler → END
 
-依赖注入:
-  - ModelGateway:    D 提供，类型为协议 agents.deps.ModelGateway
-  - AgentEventSink:  D 提供，类型为协议 agents.deps.AgentEventSink
-  - HybridRetriever: B 提供，类型为 c.schemas 中定义的检索接口
-
-当前状态: 骨架代码，不含真实 LLM 调用。
-          LLM 调用位使用 `# TODO: call ModelGateway` 标记。
-          事件写入位使用 `# TODO: call AgentEventSink` 标记。
+依赖（D / B 提供）:
+  - ModelGateway:     from apps.api.services.model_gateway
+  - AgentEventSink:   from apps.api.services.agent_event_sink (模块级单例)
+  - AgentEventDraft:  from apps.api.schemas.agent
+  - ModelMessage:     from apps.api.services.model_gateway
+  - HybridRetriever:  from worker.retrieval.retriever (B 提供)
 """
 from __future__ import annotations
 
+import time
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Callable, Literal, Optional, Protocol
+from typing import Any, Literal, Optional
 
 from .state import AgentState, RetrievalFilters, SourceRef
 
-# ═══════════════════════════════════════════════════════
-# 依赖注入协议（C 定义接口，D / B 实现）
-# ═══════════════════════════════════════════════════════
+# ── D 提供的接口 ─────────────────────────────────────
+# 这些 import 路径来自 D 的接口文档
+# (StudyAgents_ModelGateway与AgentEventSink接口说明.md)
+# 当前 D 可能尚未提交对应代码，测试时使用 FakeAdapter
+try:
+    from apps.api.schemas.agent import AgentEventDraft
+    from apps.api.services.agent_event_sink import agent_event_sink
+    from apps.api.services.model_gateway import ModelGateway, ModelMessage
+except ImportError:
+    # D 的代码尚未合入时降级为 Protocol + 占位
+    ModelGateway = object  # type: ignore
+    ModelMessage = object  # type: ignore
+    AgentEventDraft = object  # type: ignore
+    agent_event_sink = None
 
+# ── C 的 Pydantic Schema ─────────────────────────────
+from .schemas import (
+    PROMPT_VERSIONS,
+    CoordinatorDecision,
+    KnowledgeResult,
+    QAAnswer,
+)
 
-class ModelGateway(Protocol):
-    """
-    D 提供的模型调用接口。
-    签名: invoke_structured(prompt, output_schema, agent_type, temperature) -> dict
-    """
-
-    async def invoke_structured(
-        self,
-        prompt: str,
-        output_schema: dict,
-        agent_type: Literal["coordinator", "knowledge", "questioner", "evaluator"],
-        temperature: float = 0.0,
-    ) -> dict:
-        ...
-
-
-class AgentEventSink(Protocol):
-    """
-    D 提供的事件写入接口。
-    签名: emit(run_id, event_draft) -> None
-    D 负责校验、写库、生成 sequence_no、发布 SSE。
-    """
-
-    async def emit(self, run_id: str, event_draft: dict) -> None:
-        ...
-
-
-class Retriever(Protocol):
-    """
-    B 提供的检索接口。
-    签名: retrieve(query, query_embedding, filters, user_role) -> RetrievalResult
-    """
-
-    async def retrieve(
-        self,
-        query: str,
-        query_embedding: Optional[list[float]] = None,
-        filters: RetrievalFilters = None,
-        user_role: Literal["member", "admin"] = "member",
-    ) -> Any:  # -> RetrievalResult (from c.schemas)
-        ...
-
+# ── C 的提示词模板 ──────────────────────────────────
+from .prompts.coordinator import SYSTEM_PROMPT as COORDINATOR_SYSTEM
+from .prompts.coordinator import USER_MESSAGE_TEMPLATE as COORDINATOR_USER
+from .prompts.knowledge import SYSTEM_PROMPT as KNOWLEDGE_SYSTEM
+from .prompts.knowledge import USER_MESSAGE_TEMPLATE as KNOWLEDGE_USER
+from .prompts.evaluator import SYSTEM_PROMPT as EVALUATOR_SYSTEM
+from .prompts.evaluator import USER_MESSAGE_TEMPLATE as EVALUATOR_USER
 
 # ═══════════════════════════════════════════════════════
 # 常量
@@ -80,46 +61,19 @@ class Retriever(Protocol):
 
 MAX_MODEL_CALLS = 4
 MAX_NODE_HOPS = 8
-MAX_RETRIES = 2
 MAX_EVIDENCE = 8
-TEMPERATURE_KNOWLEDGE = 0.0
-TEMPERATURE_COORDINATOR = 0.0
-TEMPERATURE_EVALUATOR_QA = 0.2
-
-
-# ═══════════════════════════════════════════════════════
-# 工具函数
-# ═══════════════════════════════════════════════════════
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _limits_exceeded(state: AgentState) -> bool:
     return state.get("model_calls", 0) >= MAX_MODEL_CALLS or state.get("node_hops", 0) >= MAX_NODE_HOPS
 
 
-def _build_event_draft(
-    agent: str,
-    event_type: str,
-    status: str,
-    summary: str,
-    state: AgentState,
-    duration_ms: float = 0,
-    source_refs: Optional[list[SourceRef]] = None,
-) -> dict:
-    return {
-        "id": f"evt-{uuid.uuid4().hex[:8]}",
-        "run_id": state["run_id"],
-        "agent": agent,
-        "event_type": event_type,
-        "status": status,
-        "summary": summary,
-        "source_refs": source_refs or [],
-        "duration_ms": duration_ms,
-        "created_at": _utc_now(),
-    }
+def _build_messages(system_prompt: str, user_message: str) -> list:
+    """构建 D 的 ModelGateway 所需的 messages 列表"""
+    return [
+        ModelMessage(role="system", content=system_prompt),
+        ModelMessage(role="user", content=user_message),
+    ]
 
 
 # ═══════════════════════════════════════════════════════
@@ -127,79 +81,80 @@ def _build_event_draft(
 # ═══════════════════════════════════════════════════════
 
 
-async def coordinator_node(
-    state: AgentState,
-    model: ModelGateway,
-    events: AgentEventSink,
-) -> dict[str, Any]:
+async def coordinator_node(state: AgentState, model: ModelGateway) -> dict[str, Any]:
     """
     协调节点：意图识别 + 路由决策。
 
-    路由结果:
-      - "knowledge" → 进入知识检索
-      - "refusal"   → 直接拒答（如明显不在课程范围的问题）
-      - "error"     → 超过限额或其他异常
+    优先使用规则快速路由（省一次 LLM 调用），
+    复杂意图时调用 model.invoke_structured()。
     """
-    state["node_hops"] += 1
+    state["node_hops"] = state.get("node_hops", 0) + 1
 
     if _limits_exceeded(state):
-        return {
-            "next_node": "error",
-            "error": {"code": "AGENT_LIMIT_EXCEEDED", "message": "超过调用或节点上限", "retryable": False, "trace_id": state["run_id"]},
-        }
+        return _error_return(state, "AGENT_LIMIT_EXCEEDED", "超过调用或节点上限", False)
 
-    # TODO: 替换为 await model.invoke_structured(prompt, schema, "coordinator", TEMPERATURE_COORDINATOR)
-    # 当前使用规则快速路由（开发文档 6.6：协调可由规则完成）
-    decision = _rule_based_coordinator(state)
+    mode = state.get("mode", "qa")
+    user_input = state.get("user_input", "")
 
-    await events.emit(state["run_id"], _build_event_draft(
+    # 规则路由：qa 模式下直接走知识检索，节省模型调用
+    if mode == "qa":
+        decision = CoordinatorDecision(
+            intent="qa_ask",
+            normalized_query=user_input.strip(),
+            next_node="knowledge",
+            public_summary="协调 Agent 识别为自由问答模式，路由至知识 Agent",
+        )
+    else:
+        state["model_calls"] = state.get("model_calls", 0) + 1
+        user_msg = COORDINATOR_USER.format(
+            mode=mode,
+            user_input=user_input,
+            filters=state.get("filters", {}),
+            model_calls=state.get("model_calls", 0),
+            node_hops=state.get("node_hops", 0),
+        )
+        messages = _build_messages(COORDINATOR_SYSTEM, user_msg)
+
+        result = await model.invoke_structured(
+            run_id=state["run_id"],
+            trace_id=state.get("trace_id", state["run_id"]),
+            agent="coordinator",
+            prompt_version=PROMPT_VERSIONS["coordinator"],
+            messages=messages,
+            output_schema=CoordinatorDecision,
+        )
+        decision = result.output
+
+    # 发布事件
+    await _emit(
+        state=state,
         agent="coordinator",
         event_type="agent.summary",
         status="succeeded",
-        summary=decision.get("public_summary", "协调 Agent 完成路由决策"),
-        state=state,
-    ))
+        summary=decision.public_summary,
+    )
 
     return {
-        "next_node": decision.get("next_node", "knowledge"),
-        "normalized_query": decision.get("normalized_query", state["user_input"]),
-        "filters": decision.get("filters", state.get("filters", {})),
+        "normalized_query": decision.normalized_query,
+        "filters": decision.filters.model_dump() if hasattr(decision.filters, "model_dump") else {},
+        "next_node": decision.next_node,
     }
-
-
-def _rule_based_coordinator(state: AgentState) -> dict:
-    """规则路由：当不需要 LLM 时直接决策，节省调用次数"""
-    user_input = state.get("user_input", "")
-    mode = state.get("mode", "qa")
-
-    if mode == "qa":
-        return {
-            "intent": "qa_ask",
-            "normalized_query": user_input.strip(),
-            "next_node": "knowledge",
-            "public_summary": "协调 Agent 识别为自由问答模式，路由至知识 Agent",
-        }
-    return {"intent": "other", "normalized_query": user_input.strip(), "next_node": "knowledge", "public_summary": "路由至知识 Agent"}
 
 
 async def knowledge_node(
     state: AgentState,
     model: ModelGateway,
-    events: AgentEventSink,
-    retriever: Retriever,
+    retriever: Any,  # B 的 HybridRetriever
 ) -> dict[str, Any]:
     """
     知识节点：检索 + 证据充分性判断。
-
-    调用 B 的检索接口，返回最多 8 条 SourceRef，
-    然后判断 sufficient 状态。
     """
-    state["node_hops"] += 1
+    state["node_hops"] = state.get("node_hops", 0) + 1
 
     if _limits_exceeded(state):
-        return {"next_node": "error", "error": {"code": "AGENT_LIMIT_EXCEEDED", "message": "超过调用或节点上限", "retryable": False, "trace_id": state["run_id"]}}
+        return _error_return(state, "AGENT_LIMIT_EXCEEDED", "超过调用或节点上限", False)
 
-    # Step 1: 调用 B 的检索
+    # Step 1: 调用 B 的检索接口
     filters = state.get("filters", {})
     retrieval_result = await retriever.retrieve(
         query=state.get("normalized_query", state.get("user_input", "")),
@@ -215,136 +170,131 @@ async def knowledge_node(
     )
 
     evidence: list[SourceRef] = retrieval_result.source_refs[:MAX_EVIDENCE]
-    sufficient: bool = retrieval_result.sufficient
-    reason: str = retrieval_result.reason
 
-    # Step 2: LLM 整理知识（需 Sufficient 时才调用模型）
-    if sufficient:
-        state["model_calls"] += 1
-        # TODO: 替换为 await model.invoke_structured(prompt, schema, "knowledge", TEMPERATURE_KNOWLEDGE)
-        # 当前跳过 LLM，直接传递 evidence 给 evaluator
-        knowledge_items = [{"fact": ref["excerpt"], "source_ref_ids": [ref["document_id"]], "knowledge_point_ids": []} for ref in evidence]
-        public_summary = f"知识 Agent 找到 {len(evidence)} 条可引用证据，判断证据充足"
-    else:
-        knowledge_items = []
-        public_summary = f"知识 Agent 判断证据不足（{reason}）"
+    # Step 2: LLM 整理知识
+    state["model_calls"] = state.get("model_calls", 0) + 1
 
-    await events.emit(state["run_id"], _build_event_draft(
+    # 将 evidence 格式化为文本（给模型阅读）
+    evidence_text = "\n---\n".join(
+        f"[{i+1}] {ref['document_name']} 第{ref['page_number']}页: {ref['excerpt']}"
+        for i, ref in enumerate(evidence)
+    ) if evidence else "（无检索结果）"
+
+    user_msg = KNOWLEDGE_USER.format(
+        normalized_query=state.get("normalized_query", state.get("user_input", "")),
+        evidence_text=evidence_text,
+        filters=filters,
+        user_role="member",
+    )
+    messages = _build_messages(KNOWLEDGE_SYSTEM, user_msg)
+
+    result = await model.invoke_structured(
+        run_id=state["run_id"],
+        trace_id=state.get("trace_id", state["run_id"]),
+        agent="knowledge",
+        prompt_version=PROMPT_VERSIONS["knowledge"],
+        messages=messages,
+        output_schema=KnowledgeResult,
+        temperature=0.0,
+    )
+    kr: KnowledgeResult = result.output
+
+    # 发布事件
+    summary = (
+        f"知识 Agent 找到 {len(evidence)} 条可引用证据，判断证据{'充足' if kr.sufficient else '不足'}（{kr.reason}）"
+        if evidence
+        else f"知识 Agent 未找到匹配证据（{kr.reason}）"
+    )
+    await _emit(
+        state=state,
         agent="knowledge",
         event_type="agent.summary",
         status="succeeded",
-        summary=public_summary,
-        state=state,
-        source_refs=evidence,
-    ))
+        summary=summary,
+        source_refs=evidence if kr.sufficient else [],
+    )
 
     return {
         "evidence": evidence,
-        "knowledge": knowledge_items,
-        "sufficient": sufficient,
-        "reason": reason,
-        "next_node": "evaluator_qa" if sufficient else "refusal",
+        "knowledge": [k.model_dump() for k in kr.knowledge_items],
+        "sufficient": kr.sufficient,
+        "reason": kr.reason,
+        "next_node": "evaluator_qa" if kr.sufficient else "refusal",
     }
 
 
-async def evaluator_qa_node(
-    state: AgentState,
-    model: ModelGateway,
-    events: AgentEventSink,
-) -> dict[str, Any]:
+async def evaluator_qa_node(state: AgentState, model: ModelGateway) -> dict[str, Any]:
     """
     评测讲解节点（问答模式）：组织答案 + 引用核验。
-
-    约束：
-    - 每个关键结论必须关联 evidence 中的 SourceRef
-    - 不能创建新来源
-    - 引用对应结论，不放末尾堆砌
     """
-    state["node_hops"] += 1
-    state["model_calls"] += 1
+    state["node_hops"] = state.get("node_hops", 0) + 1
+    state["model_calls"] = state.get("model_calls", 0) + 1
 
     if _limits_exceeded(state):
-        return {"next_node": "error", "error": {"code": "AGENT_LIMIT_EXCEEDED", "message": "超过调用或节点上限", "retryable": False, "trace_id": state["run_id"]}}
+        return _error_return(state, "AGENT_LIMIT_EXCEEDED", "超过调用或节点上限", False)
 
-    # TODO: 替换为 await model.invoke_structured(prompt, schema, "evaluator", TEMPERATURE_EVALUATOR_QA)
-    # 当前使用规则模板生成回答
     evidence = state.get("evidence", [])
     knowledge = state.get("knowledge", [])
 
-    # ── 引用核验 ──
-    validated_citations = _validate_citations(knowledge, evidence)
-    orphan_citations = [c for c in validated_citations if not c["has_source"]]
-    if orphan_citations:
-        # 引用不存在 → 阻止输出
-        await events.emit(state["run_id"], _build_event_draft(
-            agent="evaluator",
-            event_type="agent.summary",
-            status="failed",
-            summary="引用核验失败——有结论无对应 SourceRef，阻止输出",
-            state=state,
-        ))
-        return {
-            "next_node": "error",
-            "error": {"code": "AGENT_OUTPUT_INVALID", "message": "回答中包含无法核验的引用", "retryable": True, "trace_id": state["run_id"]},
-        }
+    # ── 引用核验（规则，不依赖 LLM）──
+    valid_chunk_ids = {ref["chunk_id"] for ref in evidence}
+    for item in knowledge:
+        ref_ids = item.get("source_ref_ids", [])
+        if not any(rid in valid_chunk_ids for rid in ref_ids):
+            await _emit(
+                state=state,
+                agent="evaluator",
+                event_type="agent.summary",
+                status="failed",
+                summary="引用核验失败——有结论无对应 SourceRef，阻止输出",
+            )
+            return _error_return(state, "AGENT_OUTPUT_INVALID", "回答中包含无法核验的引用", True)
 
-    # ── 构建回答（模板）──
-    user_input = state.get("user_input", "")
-    citations_md = "\n".join(
-        f"- [{ref['document_name']} 第{ref['page_number']}页] {ref['excerpt'][:80]}..."
-        for ref in evidence[:3]
+    # ── LLM 组织回答 ──
+    knowledge_text = "\n".join(
+        f"- {item['fact']} [来源: {', '.join(item.get('source_ref_ids', []))}]"
+        for item in knowledge
     )
-    answer = f"""**结论**
-基于提供的课程资料，回答如下。
+    source_refs_text = "\n".join(
+        f"[{ref['document_name']} 第{ref['page_number']}页] {ref['excerpt'][:100]}..."
+        for ref in evidence
+    )
 
-**依据与步骤**
-{chr(10).join(k['fact'] for k in knowledge[:3])}
+    user_msg = EVALUATOR_USER.format(
+        user_input=state.get("user_input", ""),
+        knowledge_text=knowledge_text,
+        source_refs_text=source_refs_text,
+    )
+    messages = _build_messages(EVALUATOR_SYSTEM, user_msg)
 
-**来源**
-{citations_md}
+    result = await model.invoke_structured(
+        run_id=state["run_id"],
+        trace_id=state.get("trace_id", state["run_id"]),
+        agent="evaluator",
+        prompt_version=PROMPT_VERSIONS["evaluator"],
+        messages=messages,
+        output_schema=QAAnswer,
+        temperature=0.2,
+    )
+    answer: QAAnswer = result.output
 
-**提示**
-以上内容基于指定课程资料。
-"""
-
-    await events.emit(state["run_id"], _build_event_draft(
+    await _emit(
+        state=state,
         agent="evaluator",
         event_type="agent.summary",
         status="succeeded",
-        summary=f"评测讲解 Agent 完成答案组织与引用核验，{len(evidence)} 条引用核验通过",
-        state=state,
+        summary=answer.public_summary,
         source_refs=evidence,
-    ))
+    )
 
     return {
-        "public_response": answer,
+        "public_response": answer.answer,
         "next_node": "__end__",
     }
 
 
-def _validate_citations(
-    knowledge: list[dict],
-    evidence: list[SourceRef],
-) -> list[dict]:
-    """核验每个 knowledge_item 的 source_ref_id 是否在 evidence 中"""
-    valid_chunk_ids = {ref["chunk_id"] for ref in evidence}
-    results = []
-    for item in knowledge:
-        ref_ids = item.get("source_ref_ids", [])
-        has_source = any(rid in valid_chunk_ids for rid in ref_ids)
-        results.append({"fact": item.get("fact", ""), "source_ref_ids": ref_ids, "has_source": has_source})
-    return results
-
-
-async def refusal_node(
-    state: AgentState,
-    events: AgentEventSink,
-) -> dict[str, Any]:
-    """
-    拒答节点：生成结构化的拒答回应。
-
-    参见 agents/prompts/refusal.py 的 7 种拒答模板。
-    """
+async def refusal_node(state: AgentState) -> dict[str, Any]:
+    """拒答节点：生成结构化拒答回应"""
     from .prompts.refusal import RefusalTemplate
 
     reason = state.get("reason", "no_results")
@@ -362,13 +312,13 @@ async def refusal_node(
         f"**建议**\n{refusal['suggestion']}"
     )
 
-    await events.emit(state["run_id"], _build_event_draft(
+    await _emit(
+        state=state,
         agent="system",
         event_type="run.completed",
         status="succeeded",
         summary=f"已拒答——{reason}",
-        state=state,
-    ))
+    )
 
     return {
         "public_response": public_response,
@@ -376,28 +326,63 @@ async def refusal_node(
     }
 
 
-async def error_node(
-    state: AgentState,
-    events: AgentEventSink,
-) -> dict[str, Any]:
-    """失败节点：记录错误并终止运行"""
+async def error_node(state: AgentState) -> dict[str, Any]:
+    """失败节点"""
     error_info = state.get("error", {})
-    if not error_info:
-        error_info = {"code": "INTERNAL_ERROR", "message": "未知错误", "retryable": False, "trace_id": state["run_id"]}
-
-    await events.emit(state["run_id"], _build_event_draft(
+    await _emit(
+        state=state,
         agent="system",
         event_type="run.failed",
         status="failed",
         summary=f"运行失败——{error_info.get('code', 'UNKNOWN')}",
-        state=state,
-    ))
-
+    )
     return {
         "public_response": f"系统暂时无法完成：{error_info.get('message', '')}",
-        "error": error_info,
         "next_node": "__end__",
     }
+
+
+# ═══════════════════════════════════════════════════════
+# 工具函数
+# ═══════════════════════════════════════════════════════
+
+
+def _error_return(state: AgentState, code: str, message: str, retryable: bool) -> dict:
+    return {
+        "next_node": "error",
+        "error": {"code": code, "message": message, "retryable": retryable, "trace_id": state.get("trace_id", state["run_id"])},
+    }
+
+
+async def _emit(
+    state: AgentState,
+    agent: str,
+    event_type: str,
+    status: str,
+    summary: str,
+    source_refs: Optional[list[SourceRef]] = None,
+):
+    """通过 D 的 AgentEventSink 发布公开事件"""
+    if agent_event_sink is None:
+        return  # D 的代码尚未合入，静默跳过
+
+    draft = AgentEventDraft(
+        agent=agent,
+        event_type=event_type,
+        status=status,
+        summary=summary,
+        source_refs=source_refs or [],
+        duration_ms=0,
+    )
+    # db_session 需通过 LangGraph config["configurable"]["db_session"] 传入
+    # 当前通过 state 传递引用，实际调用时由外层注入
+    db = state.get("_db_session")  # type: ignore
+    if db is not None:
+        await agent_event_sink.emit(
+            run_id=state["run_id"],
+            event=draft,
+            db_session=db,
+        )
 
 
 # ═══════════════════════════════════════════════════════
@@ -409,20 +394,28 @@ def build_qa_graph():
     """
     构建问答状态图。
 
-    依赖注入:
-      - model:           D 的 ModelGateway 实例
-      - events:          D 的 AgentEventSink 实例
-      - retriever:       B 的 HybridRetriever 实例
-      - checkpointer:    LangGraph PostgreSQL checkpointer
+    依赖注入（通过 LangGraph config["configurable"] 传入）:
+      - model:      D 的 ModelGateway 实例
+      - retriever:  B 的 HybridRetriever 实例
+      - db_session: SQLAlchemy AsyncSession
 
     用法:
       from langgraph.graph import StateGraph
       from agents.state import AgentState
       from agents.graph import build_qa_graph
 
-      graph_builder = build_qa_graph()
-      graph = graph_builder.compile(checkpointer=checkpointer)
-      result = await graph.ainvoke(initial_state, config={"configurable": {"thread_id": thread_id}})
+      graph = build_qa_graph().compile(checkpointer=checkpointer)
+      result = await graph.ainvoke(
+          initial_state,
+          config={
+              "configurable": {
+                  "thread_id": thread_id,
+                  "model": model_instance,
+                  "retriever": retriever_instance,
+                  "db_session": db_session,
+              }
+          }
+      )
     """
     try:
         from langgraph.graph import END, StateGraph
@@ -431,28 +424,24 @@ def build_qa_graph():
 
     builder = StateGraph(AgentState)
 
-    # 注册节点
     builder.add_node("coordinator", coordinator_node)
     builder.add_node("knowledge", knowledge_node)
     builder.add_node("evaluator_qa", evaluator_qa_node)
     builder.add_node("refusal", refusal_node)
     builder.add_node("error", error_node)
 
-    # 入口
     builder.set_entry_point("coordinator")
 
-    # 边：节点间流转
-    builder.add_conditional_edges(
-        "coordinator",
-        _route_from_coordinator,
-        {"knowledge": "knowledge", "refusal": "refusal", "error": "error"},
-    )
-
-    builder.add_conditional_edges(
-        "knowledge",
-        _route_from_knowledge,
-        {"evaluator_qa": "evaluator_qa", "refusal": "refusal", "error": "error"},
-    )
+    builder.add_conditional_edges("coordinator", _route, {
+        "knowledge": "knowledge",
+        "refusal": "refusal",
+        "error": "error",
+    })
+    builder.add_conditional_edges("knowledge", _route, {
+        "evaluator_qa": "evaluator_qa",
+        "refusal": "refusal",
+        "error": "error",
+    })
 
     builder.add_edge("evaluator_qa", END)
     builder.add_edge("refusal", END)
@@ -461,9 +450,5 @@ def build_qa_graph():
     return builder
 
 
-def _route_from_coordinator(state: AgentState) -> str:
-    return state.get("next_node", "knowledge")
-
-
-def _route_from_knowledge(state: AgentState) -> str:
-    return state.get("next_node", "refusal")
+def _route(state: AgentState) -> str:
+    return state.get("next_node", "error")

@@ -10,7 +10,7 @@ AgentState — LangGraph 状态图中流转的状态对象。
 """
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Optional, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 # ── 检索过滤条件 ────────────────────────────────────
 
@@ -48,26 +48,6 @@ class KnowledgeItem(TypedDict):
     knowledge_point_ids: list[str]
 
 
-# ── 公开事件摘要 ─────────────────────────────────────
-
-
-class AgentEvent(TypedDict):
-    id: str
-    run_id: str
-    sequence_no: int
-    agent: Literal["coordinator", "knowledge", "questioner", "evaluator", "system"]
-    event_type: Literal[
-        "run.started", "agent.started", "agent.summary",
-        "agent.completed", "run.waiting_user", "run.completed",
-        "run.failed", "heartbeat"
-    ]
-    status: Literal["queued", "running", "waiting_user", "succeeded", "failed"]
-    summary: str
-    source_refs: list[SourceRef]
-    duration_ms: float
-    created_at: str  # ISO 8601
-
-
 # ── 统一错误 ─────────────────────────────────────────
 
 
@@ -94,6 +74,7 @@ class AgentState(TypedDict, total=False):
 
     # ── public ──
     run_id: str                     # UUID
+    trace_id: str                   # 链路追踪 ID，贯穿整个调用链（D 要求传递）
     thread_id: str                  # UUID
     user_id: str                    # UUID
     mode: Literal["qa", "practice"]
@@ -111,4 +92,4 @@ class AgentState(TypedDict, total=False):
 
     # ── strict ──
     user_answer: Optional[str]      # 用户提交的答案原文
-    # question_private / grade_private 由 Day 3-4 补充
+    # question_private / grade_private 由 Day 4 补充
