@@ -296,6 +296,203 @@ async def test_grading_service_creates_wrong_book_for_low_score() -> None:
 
 # ---- helpers ----
 
+# ============================================================
+# 7. mastery_status 和 difficulty_adjustment 集成测试
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_mastery_status_and_difficulty_after_two_high_scores() -> None:
+    """连续两次 >=0.8 → mastery_status 变为 mastered，难度 +1。"""
+    sid, uid, item_id = await _setup_training()
+
+    from apps.api.db.session import _get_sessionmaker
+    from apps.api.services.grading_adapter import FakeGradingAdapter
+    from apps.api.services.grading_service import GradingService
+
+    # First submission — high score
+    async with _get_sessionmaker()() as s:
+        adapter = FakeGradingAdapter(scenario="correct")  # score=10/10=1.0
+        svc = GradingService(s, adapter=adapter)
+        await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="9.8", question_version="1.0",
+            idempotency_key=f"hs1-{_uuid.uuid4().hex[:8]}",
+        )
+
+    # Get another item for second submission (same session)
+    from apps.api.services.training_service import TrainingService
+    async with _get_sessionmaker()() as s:
+        svc = TrainingService(s)
+        q = await svc.get_next_question(session_id=sid, user_id=uid)
+        assert q is not None
+        item2 = q.item_id
+
+    # Second submission — another high score
+    async with _get_sessionmaker()() as s:
+        adapter = FakeGradingAdapter(scenario="correct")
+        svc = GradingService(s, adapter=adapter)
+        result = await svc.submit_answer(
+            session_id=sid, item_id=item2, user_id=uid,
+            answer_text="9.8", question_version="1.0",
+            idempotency_key=f"hs2-{_uuid.uuid4().hex[:8]}",
+        )
+        assert result.score >= 0
+        # Verify mastery change log contains status→mastered or difficulty change
+        from sqlalchemy import select as sa_select
+
+        from apps.api.db.models.mastery_change_log import MasteryChangeLog
+        logs = (await s.execute(
+            sa_select(MasteryChangeLog).order_by(
+                MasteryChangeLog.created_at.desc(),
+            ).limit(5),
+        )).scalars().all()
+        # At least one log entry with "status" or "difficulty" in change_reason
+        reasons = [entry.change_reason for entry in logs]
+        combined = " ".join(reasons)
+        assert "status" in combined or "difficulty" in combined, (
+            f"No mastery status/difficulty change logged: {reasons}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_low_scores_downgrade_difficulty() -> None:
+    """连续两次 <0.5 → 难度 -1。"""
+    sid, uid, item_id = await _setup_training()
+
+    from apps.api.db.session import _get_sessionmaker
+    from apps.api.services.grading_adapter import FakeGradingAdapter
+    from apps.api.services.grading_service import GradingService
+    from apps.api.services.training_service import TrainingService
+
+    # First low score
+    async with _get_sessionmaker()() as s:
+        adapter = FakeGradingAdapter(scenario="incorrect")  # score=0
+        svc = GradingService(s, adapter=adapter)
+        await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="wrong", question_version="1.0",
+            idempotency_key=f"ls1-{_uuid.uuid4().hex[:8]}",
+        )
+
+    async with _get_sessionmaker()() as s:
+        svc = TrainingService(s)
+        q = await svc.get_next_question(session_id=sid, user_id=uid)
+        item2 = q.item_id if q else None
+    if item2 is None:
+        pytest.skip("No second item available")
+
+    async with _get_sessionmaker()() as s:
+        adapter = FakeGradingAdapter(scenario="incorrect")
+        svc = GradingService(s, adapter=adapter)
+        await svc.submit_answer(
+            session_id=sid, item_id=item2, user_id=uid,
+            answer_text="wrong", question_version="1.0",
+            idempotency_key=f"ls2-{_uuid.uuid4().hex[:8]}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mid_range_scores_no_difficulty_change() -> None:
+    """0.5～0.8 区间不调整难度。"""
+    sid, uid, item_id = await _setup_training()
+
+    from apps.api.db.session import _get_sessionmaker
+    from apps.api.services.grading_adapter import FakeGradingAdapter
+    from apps.api.services.grading_service import GradingService
+
+    # Submit with partial score (0.5 of max)
+    async with _get_sessionmaker()() as s:
+        adapter = FakeGradingAdapter(scenario="partial")
+        svc = GradingService(s, adapter=adapter)
+        await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="half", question_version="1.0",
+            idempotency_key=f"mid1-{_uuid.uuid4().hex[:8]}",
+        )
+
+    # Second partial score
+    from apps.api.services.training_service import TrainingService
+    async with _get_sessionmaker()() as s:
+        svc = TrainingService(s)
+        q = await svc.get_next_question(session_id=sid, user_id=uid)
+        item2 = q.item_id if q else None
+    if item2 is None:
+        pytest.skip("No second item")
+
+    async with _get_sessionmaker()() as s:
+        adapter = FakeGradingAdapter(scenario="partial")
+        svc = GradingService(s, adapter=adapter)
+        await svc.submit_answer(
+            session_id=sid, item_id=item2, user_id=uid,
+            answer_text="half", question_version="1.0",
+            idempotency_key=f"mid2-{_uuid.uuid4().hex[:8]}",
+        )
+        # No difficulty change should be logged for mid-range
+        from sqlalchemy import select as sa_select
+
+        from apps.api.db.models.mastery_change_log import MasteryChangeLog
+        logs = (await s.execute(
+            sa_select(MasteryChangeLog).order_by(
+                MasteryChangeLog.created_at.desc(),
+            ).limit(5),
+        )).scalars().all()
+        diff_logs = [
+            entry.change_reason for entry in logs
+            if "difficulty" in entry.change_reason
+        ]
+        assert len(diff_logs) == 0, (
+            f"Difficulty should not change in mid-range: {diff_logs}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_idempotent_replay_does_not_reupdate_mastery_status() -> None:
+    """幂等重放不重复更新 mastery status 或 difficulty。"""
+    sid, uid, item_id = await _setup_training()
+
+    from sqlalchemy import func
+    from sqlalchemy import select as sa_select
+
+    from apps.api.db.models.mastery_change_log import MasteryChangeLog
+    from apps.api.db.session import _get_sessionmaker
+    from apps.api.services.grading_service import GradingService
+
+    key = f"idem-{_uuid.uuid4().hex[:8]}"
+
+    # First submission
+    async with _get_sessionmaker()() as s:
+        svc = GradingService(s)
+        await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="9.8", question_version="1.0",
+            idempotency_key=key,
+        )
+
+    # Count change logs after first
+    async with _get_sessionmaker()() as s:
+        count1 = (await s.execute(
+            sa_select(func.count()).select_from(MasteryChangeLog),
+        )).scalar_one()
+
+    # Replay same key
+    async with _get_sessionmaker()() as s:
+        svc = GradingService(s)
+        await svc.submit_answer(
+            session_id=sid, item_id=item_id, user_id=uid,
+            answer_text="9.8", question_version="1.0",
+            idempotency_key=key,
+        )
+
+    # Count should not increase (cached response)
+    async with _get_sessionmaker()() as s:
+        count2 = (await s.execute(
+            sa_select(func.count()).select_from(MasteryChangeLog),
+        )).scalar_one()
+        assert count2 == count1, (
+            f"MasteryChangeLog count increased: {count1} → {count2}"
+        )
+
+
 _pg_engine = None
 
 

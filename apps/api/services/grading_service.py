@@ -217,7 +217,7 @@ class GradingService:
         mastery.last_practiced_at = datetime.now(UTC).replace(tzinfo=None)
         await self._session.flush()
 
-        # 记录变更
+        # 记录变更（含 score_ratio 用于后续状态和难度计算）
         is_good = score_ratio >= mastery_rules.MASTERED_THRESHOLD
         change_reason = "grade_result" if is_good else "wrong_answer"
         self._session.add(MasteryChangeLog(
@@ -230,6 +230,48 @@ class GradingService:
             before_streak=before_streak,
             after_streak=mastery.streak,
         ))
+
+        # ---- 7b. 计算 mastery_status 和 difficulty（基于历史评分） ----
+        if is_gradable:
+            recent_ratios = await self._get_recent_score_ratios(
+                mastery.id, base_grade_id=grade.id,
+            )
+            recent_ratios.append(score_ratio)
+
+            # mastery status
+            mastery_status = mastery_rules.compute_mastery_status(
+                [r >= mastery_rules.MASTERED_THRESHOLD for r in recent_ratios[-5:]],
+            )
+
+            # difficulty adjustment (using current difficulty=2 as default)
+            current_diff = 2  # MasteryRecord has no difficulty column; default to 2
+            new_diff = mastery_rules.compute_difficulty_adjustment(
+                recent_ratios[-5:], current_diff,
+            )
+            if new_diff != current_diff:
+                diff_reason = f"difficulty {current_diff}→{new_diff}"
+                self._session.add(MasteryChangeLog(
+                    mastery_id=mastery.id,
+                    user_id=user_id,
+                    change_reason=diff_reason,
+                    source_grade_id=grade.id,
+                    before_level=mastery.current_level,
+                    after_level=mastery.current_level,
+                    before_streak=mastery.streak,
+                    after_streak=mastery.streak,
+                ))
+
+            if mastery_status != "pending":
+                self._session.add(MasteryChangeLog(
+                    mastery_id=mastery.id,
+                    user_id=user_id,
+                    change_reason=f"status→{mastery_status}",
+                    source_grade_id=grade.id,
+                    before_level=mastery.current_level,
+                    after_level=mastery.current_level,
+                    before_streak=mastery.streak,
+                    after_streak=mastery.streak,
+                ))
 
         # ---- 8. 创建 WrongBookEntry（使用确定性规则） ----
         # 独立于 is_gradable：review_required 时仍应记录错题
@@ -271,6 +313,39 @@ class GradingService:
 
         await self._session.commit()
         return response_data
+
+    async def _get_recent_score_ratios(
+        self, mastery_id: str, *, base_grade_id: str | None = None,
+    ) -> list[float]:
+        """获取最近评分比例（不含当前 grade_id，避免重复计算）。"""
+        logs = await self._session.execute(
+            select(MasteryChangeLog)
+            .where(
+                MasteryChangeLog.mastery_id == mastery_id,
+                MasteryChangeLog.source_grade_id.isnot(None),
+            )
+            .order_by(MasteryChangeLog.created_at.desc())
+            .limit(5),
+        )
+        logs = list(logs.scalars().all())
+        ratios: list[float] = []
+        for log in logs:
+            if log.source_grade_id == base_grade_id:
+                continue
+            grade = await self._session.execute(
+                select(GradeResult).where(
+                    GradeResult.id == log.source_grade_id,
+                ),
+            )
+            grade = grade.scalar_one_or_none()
+            if grade and grade.total_score is not None:
+                # approximate ratio from mastery level change
+                ratio = round(
+                    (log.after_level - 0.7 * log.before_level) / 0.3, 2,
+                )
+                ratio = max(0.0, min(1.0, ratio))
+                ratios.append(ratio)
+        return list(reversed(ratios))  # chronological order
 
     async def _get_or_create_mastery(self, user_id: str, kp: str) -> MasteryRecord:
         result = await self._session.execute(
