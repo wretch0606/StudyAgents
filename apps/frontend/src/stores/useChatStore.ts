@@ -4,7 +4,7 @@
 // 职责：
 //   1. 持有对话消息、Agent 工作流状态、文档溯源引用
 //   2. 通过 fetchHistory() 从 GET /api/chat/history 获取初始数据
-//      （dev 模式下由 vite-plugin-mock 拦截，production 由后端提供）
+//      （dev 模式下由本地 Vite Mock 插件拦截，production 由后端提供）
 //   3. 预留 addMessage / appendStreamChunk / finishStream 为
 //      SSE 流式输出接口
 // ============================================================
@@ -140,7 +140,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 从后端获取对话历史初始化 Store。
    *
-   * dev 模式下被 vite-plugin-mock（mock/chat.ts）拦截，
+   * dev 模式下被本地 vite-plugin-mock.ts 拦截，
    * production 模式下请求真实的 GET /api/chat/history。
    *
    * 幂等：多次调用不会重复加载（loaded === true 时直接返回）。
