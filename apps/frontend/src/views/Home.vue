@@ -8,6 +8,7 @@
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
 import { ref, nextTick } from 'vue'
+import { tokenizeMarkdownLine } from '../utils/markdown'
 
 // =========================================================
 // 导航模式（对话 / 训练 / 错题本）
@@ -556,7 +557,16 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                 <!-- 气泡 -->
                 <div class="msg-body">
                   <div :class="['bubble', msg.role, { refusal: msg.isRefusal }]">
-                    <p v-for="(line, li) in msg.content.split('\n')" :key="li" class="bubble-line" v-html="renderMarkdownLine(line)" />
+                    <p v-for="(line, li) in msg.content.split('\n')" :key="li" class="bubble-line">
+                      <template
+                        v-for="(token, ti) in tokenizeMarkdownLine(line)"
+                        :key="`${li}-${ti}`"
+                      >
+                        <strong v-if="token.type === 'strong'">{{ token.content }}</strong>
+                        <code v-else-if="token.type === 'code'" class="inline-code">{{ token.content }}</code>
+                        <template v-else>{{ token.content }}</template>
+                      </template>
+                    </p>
                   </div>
 
                   <!-- 引用标签 -->
@@ -752,20 +762,6 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
     </aside>
   </div>
 </template>
-
-<script lang="ts">
-// ============================================================
-// 简易 Markdown 行内渲染（不引入外部依赖）
-// ============================================================
-export function renderMarkdownLine(line: string): string {
-  let html = line
-    // 粗体
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    // 行内代码
-    .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-  return html
-}
-</script>
 
 <style scoped>
 /* ============================================================
