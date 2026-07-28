@@ -262,6 +262,7 @@ async def _setup_training(uid=None):
 
     if uid is None:
         from sqlalchemy import select as sa_select
+
         from apps.api.db.models.user import User
         async with _get_sessionmaker()() as s:
             u = (await s.execute(sa_select(User).limit(1))).scalar_one()
