@@ -7,7 +7,7 @@ import { mockPlugin } from './vite-plugin-mock.js'
 export default defineConfig({
   plugins: [
     vue(),
-    // 开发环境 Mock 拦截插件：
+    // 开发环境 Mock 拦截插件（auth 相关）：
     // 拦截 /api/auth/* 请求，直接返回 contracts/mock/ 中的 JSON 数据
     // 仅在 dev server (npm run dev) 生效，不影响 production build
     mockPlugin(),

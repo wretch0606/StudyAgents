@@ -1,0 +1,5 @@
+{
+  "$comment": "POST /api/chat/upload — 问答附件上传成功响应",
+  "file_url": "/mock/uploads/attachment-mock-1706000000001.pdf",
+  "file_name": "课程资料摘录.pdf"
+}
