@@ -37,7 +37,8 @@ SYSTEM_PROMPT = """\
 严格输出以下 JSON：
 {{
   "sufficient": true | false,
-  "reason": "sufficient" | "no_results" | "topic_mismatch" | "missing_condition" | "conflicting" | "staff_only" | "image_unavailable",
+  "reason": "sufficient" | "no_results" | "topic_mismatch" | \
+    "missing_condition" | "conflicting" | "staff_only" | "image_unavailable",
   "knowledge_items": [
     {{
       "fact": "结构化的知识点描述",

@@ -7,7 +7,6 @@
 - 建议补充的资料
 """
 
-from typing import Optional
 
 # ── 拒答原因 → 对用户展示的文案映射 ──────────────
 
@@ -52,8 +51,8 @@ class RefusalTemplate:
     def build(
         cls,
         reason: str,
-        searched_chapters: Optional[list[str]] = None,
-        suggestion: Optional[str] = None,
+        searched_chapters: list[str] | None = None,
+        suggestion: str | None = None,
     ) -> dict[str, str]:
         """
         生成拒答的公开响应。

@@ -10,10 +10,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "apps"))
 
-from agents.graph import build_qa_graph  # noqa: E402
-from agents.schemas import KnowledgeItemSchema, KnowledgeResult, QAAnswer  # noqa: E402
 from worker.retrieval.retriever import HybridRetriever  # noqa: E402
 from worker.schemas import Chunk  # noqa: E402
+
+from agents.graph import build_qa_graph  # noqa: E402
+from agents.schemas import KnowledgeItemSchema, KnowledgeResult, QAAnswer  # noqa: E402
 
 
 class FakeModelGateway:

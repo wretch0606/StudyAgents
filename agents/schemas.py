@@ -6,12 +6,15 @@ D 的 ModelGateway.invoke_structured() 要求 output_schema 为 Pydantic BaseMod
 """
 from __future__ import annotations
 
-from typing import Optional
-
 try:
     from pydantic import BaseModel, Field
 except ImportError:
     raise ImportError("请安装 pydantic: pip install pydantic")
+
+EVIDENCE_REASON_DESCRIPTION = (
+    "sufficient | no_results | topic_mismatch | missing_condition | "
+    "conflicting | staff_only | image_unavailable"
+)
 
 
 # ═══════════════════════════════════════════════════════
@@ -21,8 +24,8 @@ except ImportError:
 
 class CoordinatorFilters(BaseModel):
     chapter_ids: list[str] = Field(default_factory=list, description="章节 ID 列表")
-    question_types: Optional[list[str]] = Field(default=None, description="题型限制")
-    difficulty: Optional[int] = Field(default=None, ge=1, le=3, description="难度 1-3")
+    question_types: list[str] | None = Field(default=None, description="题型限制")
+    difficulty: int | None = Field(default=None, ge=1, le=3, description="难度 1-3")
 
 
 class CoordinatorDecision(BaseModel):
@@ -50,7 +53,7 @@ class KnowledgeResult(BaseModel):
     sufficient: bool = Field(..., description="证据是否足以回答问题")
     reason: str = Field(
         ...,
-        description="sufficient | no_results | topic_mismatch | missing_condition | conflicting | staff_only | image_unavailable"
+        description=EVIDENCE_REASON_DESCRIPTION,
     )
     knowledge_items: list[KnowledgeItemSchema] = Field(default_factory=list)
     selected_source_ref_ids: list[str] = Field(default_factory=list)
@@ -66,7 +69,7 @@ class KnowledgeResult(BaseModel):
 class Citation(BaseModel):
     document_name: str
     page_number: int = Field(ge=1)
-    question_no: Optional[str] = None
+    question_no: str | None = None
     excerpt_snippet: str = Field(..., max_length=80, description="关键摘录前 80 字")
 
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Optional
 
 # 确保项目根在 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -44,10 +43,10 @@ def _fail(name: str, detail: str = ""):
     print(msg)
 
 
-def _load_mock(filename: str) -> Optional[dict]:
+def _load_mock(filename: str) -> dict | None:
     path = os.path.join(os.path.dirname(__file__), "..", "..", "contracts", "mock", filename)
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except Exception as e:
         _fail(f"加载 {filename}", str(e))
@@ -96,7 +95,10 @@ def test_agent_event_fields():
         _fail("agent_events 为空")
         return
 
-    required = {"id", "run_id", "sequence_no", "agent", "event_type", "status", "summary", "created_at"}
+    required = {
+        "id", "run_id", "sequence_no", "agent",
+        "event_type", "status", "summary", "created_at",
+    }
     valid_agents = {"coordinator", "knowledge", "questioner", "evaluator", "system"}
     for i, evt in enumerate(events):
         missing = required - set(evt.keys())
@@ -118,7 +120,10 @@ def test_public_question_no_answer_leak():
     if data is None:
         return
     pq = data.get("public_question", {})
-    forbidden = ["expected_answer", "rubric", "answer_private", "private_content", "private", "step_scores"]
+    forbidden = [
+        "expected_answer", "rubric", "answer_private",
+        "private_content", "private", "step_scores",
+    ]
     for key in forbidden:
         if key in pq:
             _fail("泄露检测", f"public_question 包含禁止字段 '{key}'")
@@ -148,7 +153,10 @@ def test_refusal_templates():
     """7 种拒答 reason 都有对应文案"""
     from agents.prompts.refusal import RefusalTemplate
 
-    all_reasons = ["no_results", "topic_mismatch", "missing_condition", "conflicting", "staff_only", "image_unavailable"]
+    all_reasons = [
+        "no_results", "topic_mismatch", "missing_condition",
+        "conflicting", "staff_only", "image_unavailable",
+    ]
     for reason in all_reasons:
         try:
             result = RefusalTemplate.build(reason, searched_chapters=["ch-03"])

@@ -10,7 +10,7 @@ AgentState — LangGraph 状态图中流转的状态对象。
 """
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Literal, TypedDict
 
 # ── 检索过滤条件 ────────────────────────────────────
 
@@ -18,11 +18,11 @@ from typing import Any, Literal, Optional, TypedDict
 class RetrievalFilters(TypedDict, total=False):
     """对应 c/schemas.py 的 RetrievalFilters"""
     chapter_ids: list[str]
-    question_types: Optional[list[str]]
-    difficulty: Optional[int]
+    question_types: list[str] | None
+    difficulty: int | None
     exclude_chunk_ids: list[str]
     knowledge_point_ids: list[str]
-    year: Optional[int]
+    year: int | None
 
 
 # ── SourceRef（与 contracts/source-ref.schema.json 一致）────
@@ -32,10 +32,10 @@ class SourceRef(TypedDict):
     document_id: str          # UUID
     document_name: str        # "光学讲义.pdf"
     page_number: int          # ≥1
-    question_no: Optional[str]
+    question_no: str | None
     chunk_id: str             # UUID
     excerpt: str              # ≤300 字
-    page_image_url: Optional[str]
+    page_image_url: str | None
     score: float              # RRF 分数
 
 
@@ -56,7 +56,7 @@ class ApiError(TypedDict):
     message: str
     retryable: bool
     trace_id: str
-    details: Optional[dict[str, Any]]
+    details: dict[str, Any] | None
 
 
 # ═══════════════════════════════════════════════════════
@@ -80,11 +80,11 @@ class AgentState(TypedDict, total=False):
     mode: Literal["qa", "practice"]
     user_input: str
     filters: RetrievalFilters
-    public_response: Optional[str]  # 最终公开输出
+    public_response: str | None  # 最终公开输出
     model_calls: int                # 已用模型调用次数
     node_hops: int                  # 已跳节点数
     retry_count: int                # 当前步骤重试次数
-    error: Optional[ApiError]
+    error: ApiError | None
 
     # ── private ──
     normalized_query: str
@@ -95,5 +95,5 @@ class AgentState(TypedDict, total=False):
     knowledge: list[KnowledgeItem]
 
     # ── strict ──
-    user_answer: Optional[str]      # 用户提交的答案原文
+    user_answer: str | None      # 用户提交的答案原文
     # question_private / grade_private 由 Day 4 补充

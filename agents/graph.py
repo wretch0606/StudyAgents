@@ -16,8 +16,9 @@ LangGraph 固定状态图，对应开发文档 6.3 节（图 4）。
   - ModelMessage:     from apps.api.services.model_gateway
   - HybridRetriever:  from worker.retrieval.retriever (B 提供)
 """
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, Mapping, Optional
+from typing import Any
 
 try:
     from langchain_core.runnables import RunnableConfig
@@ -29,11 +30,15 @@ from .state import AgentState, SourceRef
 try:
     from worker.schemas import (
         RetrievalFilters as WorkerRetrievalFilters,
+    )
+    from worker.schemas import (
         SourceRef as WorkerSourceRef,
     )
 except ImportError:
     from apps.worker.schemas import (
         RetrievalFilters as WorkerRetrievalFilters,
+    )
+    from apps.worker.schemas import (
         SourceRef as WorkerSourceRef,
     )
 
@@ -66,20 +71,19 @@ except ImportError:
     agent_event_sink = None
 
 # ── C 的 Pydantic Schema ─────────────────────────────
+# ── C 的提示词模板 ──────────────────────────────────
+from .prompts.coordinator import SYSTEM_PROMPT as COORDINATOR_SYSTEM
+from .prompts.coordinator import USER_MESSAGE_TEMPLATE as COORDINATOR_USER
+from .prompts.evaluator import SYSTEM_PROMPT as EVALUATOR_SYSTEM
+from .prompts.evaluator import USER_MESSAGE_TEMPLATE as EVALUATOR_USER
+from .prompts.knowledge import SYSTEM_PROMPT as KNOWLEDGE_SYSTEM
+from .prompts.knowledge import USER_MESSAGE_TEMPLATE as KNOWLEDGE_USER
 from .schemas import (
     PROMPT_VERSIONS,
     CoordinatorDecision,
     KnowledgeResult,
     QAAnswer,
 )
-
-# ── C 的提示词模板 ──────────────────────────────────
-from .prompts.coordinator import SYSTEM_PROMPT as COORDINATOR_SYSTEM
-from .prompts.coordinator import USER_MESSAGE_TEMPLATE as COORDINATOR_USER
-from .prompts.knowledge import SYSTEM_PROMPT as KNOWLEDGE_SYSTEM
-from .prompts.knowledge import USER_MESSAGE_TEMPLATE as KNOWLEDGE_USER
-from .prompts.evaluator import SYSTEM_PROMPT as EVALUATOR_SYSTEM
-from .prompts.evaluator import USER_MESSAGE_TEMPLATE as EVALUATOR_USER
 
 # ═══════════════════════════════════════════════════════
 # 常量
@@ -91,7 +95,10 @@ MAX_EVIDENCE = 8
 
 
 def _limits_exceeded(state: AgentState) -> bool:
-    return state.get("model_calls", 0) >= MAX_MODEL_CALLS or state.get("node_hops", 0) >= MAX_NODE_HOPS
+    return (
+        state.get("model_calls", 0) >= MAX_MODEL_CALLS
+        or state.get("node_hops", 0) >= MAX_NODE_HOPS
+    )
 
 
 def _build_messages(system_prompt: str, user_message: str) -> list:
@@ -296,8 +303,10 @@ async def knowledge_node(
     kr: KnowledgeResult = result.output
 
     # 发布事件
+    sufficiency_label = "充足" if kr.sufficient else "不足"
     summary = (
-        f"知识 Agent 找到 {len(evidence)} 条可引用证据，判断证据{'充足' if kr.sufficient else '不足'}（{kr.reason}）"
+        f"知识 Agent 找到 {len(evidence)} 条可引用证据，"
+        f"判断证据{sufficiency_label}（{kr.reason}）"
         if evidence
         else f"知识 Agent 未找到匹配证据（{kr.reason}）"
     )
@@ -471,7 +480,12 @@ async def error_node(
 def _error_return(state: AgentState, code: str, message: str, retryable: bool) -> dict:
     return {
         "next_node": "error",
-        "error": {"code": code, "message": message, "retryable": retryable, "trace_id": state.get("trace_id", state["run_id"])},
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "trace_id": state.get("trace_id", state["run_id"]),
+        },
         "model_calls": state.get("model_calls", 0),
         "node_hops": state.get("node_hops", 0),
     }
@@ -483,7 +497,7 @@ async def _emit(
     event_type: str,
     status: str,
     summary: str,
-    source_refs: Optional[list[SourceRef]] = None,
+    source_refs: list[SourceRef] | None = None,
     config: RunnableConfig | None = None,
 ):
     """通过 D 的 AgentEventSink 发布公开事件"""

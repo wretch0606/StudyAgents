@@ -57,7 +57,8 @@ SYSTEM_PROMPT = """\
   ],
   "source_ref_ids": ["document_id_1"],
   "confidence_note": "如有不确定之处，在此说明",
-  "public_summary": "中文公开摘要，如'评测讲解 Agent 完成答案组织与引用核验，2 个关键结论均有关联来源'"
+  "public_summary": \
+    "中文公开摘要，如'评测讲解 Agent 完成答案组织与引用核验，2 个关键结论均有关联来源'"
 }}
 """
 
