@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/schemas/evaluation-run-manifest.schema.json",
+  "title": "StudyAgentsEvaluationRunManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "created_at",
+    "code_commit",
+    "material_commit",
+    "material_manifest_sha256",
+    "dataset_sha256",
+    "policy_sha256",
+    "models",
+    "prompt_versions",
+    "retrieval_parameters",
+    "environment"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "code_commit": {"type": "string", "minLength": 1},
+    "material_commit": {"type": "string", "minLength": 1},
+    "material_manifest_sha256": {"type": "string", "minLength": 1},
+    "dataset_sha256": {"type": "string", "minLength": 1},
+    "policy_sha256": {"type": "string", "minLength": 1},
+    "models": {"type": "object"},
+    "prompt_versions": {"type": "object"},
+    "retrieval_parameters": {"type": "object"},
+    "environment": {"type": "object"}
+  }
+}
