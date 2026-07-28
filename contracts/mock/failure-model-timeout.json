@@ -1,0 +1,82 @@
+{
+  "$schema": "https://studyagents.local/contracts/mock/failure-model-timeout.schema.json",
+  "title": "Mock: 失败场景——模型超时",
+  "description": "模型调用超时后的错误响应。用户看到明确状态而非空白页面，前端根据 retryable=true 展示重试按钮。",
+  "scenario": {
+    "mode": "qa",
+    "user_input": "请详细解释麦克斯韦方程组的物理意义及其应用",
+    "trigger": "模型在 25 秒内未返回"
+  },
+  "public_response": {
+    "run_id": "f6a7b8c9-d0e1-2345-fabc-d12345678901",
+    "status": "failed",
+    "error": {
+      "code": "AGENT_MODEL_TIMEOUT",
+      "message": "模型服务暂时未响应，请稍后重试。",
+      "retryable": true,
+      "trace_id": "01JXYZ789ABC123456",
+      "details": {
+        "retry_attempt": "2/2",
+        "next_action": "点击重试或稍后重新提问"
+      }
+    },
+    "agent_events": [
+      {
+        "id": "evt-040",
+        "run_id": "f6a7b8c9-d0e1-2345-fabc-d12345678901",
+        "sequence_no": 1,
+        "agent": "coordinator",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "协调 Agent 识别为自由问答，路由至知识 Agent",
+        "duration_ms": 110,
+        "created_at": "2026-07-26T02:33:00.110Z"
+      },
+      {
+        "id": "evt-041",
+        "run_id": "f6a7b8c9-d0e1-2345-fabc-d12345678901",
+        "sequence_no": 2,
+        "agent": "knowledge",
+        "event_type": "agent.summary",
+        "status": "succeeded",
+        "summary": "知识 Agent 在全部章节找到 8 条候选证据",
+        "duration_ms": 300,
+        "created_at": "2026-07-26T02:33:00.410Z"
+      },
+      {
+        "id": "evt-042",
+        "run_id": "f6a7b8c9-d0e1-2345-fabc-d12345678901",
+        "sequence_no": 3,
+        "agent": "evaluator",
+        "event_type": "agent.summary",
+        "status": "failed",
+        "summary": "评测讲解 Agent 调用模型超时（第 2 次重试失败）",
+        "duration_ms": 25500,
+        "created_at": "2026-07-26T02:33:25.910Z"
+      },
+      {
+        "id": "evt-043",
+        "run_id": "f6a7b8c9-d0e1-2345-fabc-d12345678901",
+        "sequence_no": 4,
+        "agent": "system",
+        "event_type": "run.failed",
+        "status": "failed",
+        "summary": "运行失败——模型服务暂时不可用，建议稍后重试",
+        "duration_ms": 25600,
+        "created_at": "2026-07-26T02:33:25.910Z"
+      }
+    ],
+    "model_calls": 2,
+    "node_hops": 3,
+    "retry_count": 2,
+    "elapsed_ms": 25600,
+    "created_at": "2026-07-26T02:33:25.910Z"
+  },
+  "$$privacy_check": {
+    "contains_private_answer": false,
+    "contains_rubric": false,
+    "contains_user_data_leak": false,
+    "note": "失败场景仅暴露错误码、trace_id 和重试状态，不泄露系统内部堆栈、密钥或模型原始错误",
+    "verdict": "✅ 安全"
+  }
+}

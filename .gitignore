@@ -6,6 +6,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -40,3 +41,10 @@ test-results/
 private/
 datasets/raw/
 tests/evaluation/private/
+
+# Documents (not tracked)
+*.docx
+_docx_extracted/
+
+# Local course/evaluation working data
+.local-data/

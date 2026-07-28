@@ -4,6 +4,10 @@
 
 > 当前目标：由 5 人小组在 7 天内完成可答辩演示的 MVP。系统需要跑通“资料导入 → 可信问答 → 严格拒答 → 专项训练 → 评分讲解 → 错题沉淀”闭环。
 
+本周的功能取舍、验收用例和质量门槛以 [docs/MVP_SCOPE.md](docs/MVP_SCOPE.md) 为准。
+课程样例来源见 [docs/COURSE_MATERIALS.md](docs/COURSE_MATERIALS.md)，集成门结果统一记录在 [docs/ACCEPTANCE_TRACKER.md](docs/ACCEPTANCE_TRACKER.md)。
+第 6 天使用的 50 条评测基线、双人标注流程和指标工具见 [tests/evaluation/README.md](tests/evaluation/README.md)。
+
 ## 核心能力
 
 - 导入数字 PDF，并为扫描 PDF 提供基础 OCR。

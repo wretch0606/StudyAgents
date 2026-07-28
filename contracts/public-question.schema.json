@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyagents.local/contracts/public-question.schema.json",
+  "title": "PublicQuestion",
+  "description": "公开题目结构（C → D → E）。出题 Agent 生成后经 D 的 API 传给前端展示。严格禁止包含 expected_answer、rubric、private_content 等私有字段。",
+  "type": "object",
+  "required": [
+    "item_id",
+    "order_no",
+    "source_kind",
+    "question_type",
+    "difficulty",
+    "stem",
+    "source_label",
+    "progress"
+  ],
+  "properties": {
+    "item_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "题目唯一 ID"
+    },
+    "order_no": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "序号（1-N）"
+    },
+    "source_kind": {
+      "type": "string",
+      "enum": ["past_exam", "generated_variant"],
+      "description": "past_exam=历年真题，generated_variant=AI变式题。前端据此展示'历年真题'或'AI 变式题'标记。"
+    },
+    "question_type": {
+      "type": "string",
+      "enum": ["choice", "fill_blank", "calculation", "short_answer"],
+      "description": "题型"
+    },
+    "difficulty": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "description": "难度等级：1=基础概念/直接代入，2=标准综合题，3=多步骤/条件变化题"
+    },
+    "stem": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "题干，LaTeX 公式使用 $...$（行内）或 $$...$$（块级）"
+    },
+    "options": {
+      "type": "array",
+      "description": "选择题选项列表；非选择题为空数组",
+      "items": {
+        "type": "object",
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-D]$" },
+          "text": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "source_label": {
+      "type": "string",
+      "description": "展示标签，如 '2024 年真题，第 3 题'",
+      "examples": ["2024 年真题，第 3 题", "AI 变式题 · 光的干涉"]
+    },
+    "progress": {
+      "type": "object",
+      "required": ["current", "total"],
+      "properties": {
+        "current": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false,
+      "description": "训练进度，如 {\"current\": 2, \"total\": 5}"
+    }
+  },
+  "additionalProperties": false,
+  "$$comment": "安全约束：此对象不得包含 expected_answer、rubric（评分点）、私有证据块 content、模型验证文本等字段。详见接口契约文档第五节。"
+}
