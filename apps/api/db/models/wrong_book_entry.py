@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from apps.api.db.base import Base, created_at_col, pk, updated_at_col
@@ -30,6 +30,18 @@ class WrongBookEntry(Base):
     correct_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_reviewed_at: Mapped[str | None] = mapped_column(DateTime, nullable=True)
+    # Issue 16-5 新增字段 — 对齐 api(6).ts WrongBookEntry 契约
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    source_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    knowledge_point_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    first_error_at: Mapped[str | None] = mapped_column(DateTime, nullable=True)
+    last_error_at: Mapped[str | None] = mapped_column(DateTime, nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_max_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_review_at: Mapped[str | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
 

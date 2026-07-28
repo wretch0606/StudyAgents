@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, Query
+from pydantic import BaseModel
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -319,9 +321,15 @@ async def submit_answer(
 # POST /api/practice/sessions/{session_id}/finish — 结束训练
 # ==================================================================
 
+class PracticeSessionFinishRequest(BaseModel):
+    """结束训练请求体 — status 区分正常完成与提前结束。"""
+    status: Literal["completed", "cancelled"] = "completed"
+
+
 @router.post("/{session_id}/finish", response_model=FinishPracticeSessionResponse)
 async def finish_practice_session(
     session_id: str,
+    body: PracticeSessionFinishRequest = PracticeSessionFinishRequest(),
     user_id: str = Depends(get_current_user),
     _csrf: None = Depends(require_csrf),
     session: AsyncSession = Depends(get_db_session),
@@ -334,7 +342,7 @@ async def finish_practice_session(
             status_code=404, retryable=False,
         )
 
-    # 幂等：已结束则直接返回
+    # 幂等：已结束则直接返回第一次的结果
     if ps.status in ("completed", "cancelled"):
         return FinishPracticeSessionResponse(
             session_id=session_id,
@@ -343,13 +351,13 @@ async def finish_practice_session(
         )
 
     await repo.update_practice_session(
-        session, session_id, user_id=user_id, status="completed",
+        session, session_id, user_id=user_id, status=body.status,
     )
     await session.commit()
 
     return FinishPracticeSessionResponse(
         session_id=session_id,
-        status="completed",
+        status=body.status,
         summary_url=f"/api/practice/sessions/{session_id}/summary",
     )
 
@@ -430,7 +438,7 @@ async def get_session_summary(
         kp_scores[kp]["total"] += grade.total_score or 0
         kp_scores[kp]["max"] += 10
 
-    # 组装知识点表现
+    # 组装知识点表现（含真实 mastery_change）
     kp_perf = []
     for kp, data in kp_scores.items():
         # 查找对应 mastery record
@@ -442,11 +450,31 @@ async def get_session_summary(
         )
         mr = mr_result.scalar_one_or_none()
         current_mastery = mr.current_level if mr else 0.5
+
+        # 从 MasteryChangeLog 计算本次训练的 mastery 变化
+        from apps.api.db.models.mastery_change_log import MasteryChangeLog
+        mastery_change = 0.0
+        if mr is not None:
+            # 找本次 session 中与该 mastery record 相关的变更日志
+            log_result = await session.execute(
+                sa_select(MasteryChangeLog).where(
+                    MasteryChangeLog.mastery_id == mr.id,
+                    MasteryChangeLog.change_reason.in_(
+                        ("grade_result", "wrong_answer"),
+                    ),
+                ).order_by(MasteryChangeLog.created_at.asc()),
+            )
+            logs = log_result.scalars().all()
+            if logs:
+                first_before = logs[0].before_level
+                last_after = logs[-1].after_level
+                mastery_change = round(last_after - first_before, 4)
+
         kp_perf.append(KnowledgePointPerformance(
             knowledge_point_id=kp,
             knowledge_point_name=data["name"],
             mastery=current_mastery,
-            mastery_change=0.0,  # baseline; real delta requires before/after tracking
+            mastery_change=mastery_change,
         ))
 
     # 生成建议

@@ -273,26 +273,61 @@ class GradingService:
                     after_streak=mastery.streak,
                 ))
 
-        # ---- 8. 创建 WrongBookEntry（使用确定性规则） ----
+        # ---- 8. 创建/更新 WrongBookEntry（使用确定性规则） ----
         # 独立于 is_gradable：review_required 时仍应记录错题
         uncertain = result.get("review_required", False)
         wrong_book_created = False
         if mastery_rules.should_create_wrong_book(
             score_ratio, uncertain=uncertain,
         ):
+            now_ts = datetime.now(UTC).replace(tzinfo=None)
             correct_answer = expected or result.get("explanation", "")
-            entry = WrongBookEntry(
-                user_id=user_id,
-                item_id=item_id,
-                submission_id=submission.id,
-                grade_id=grade.id,
-                question_type=item.question_type,
-                stem_snapshot=item.stem,
-                wrong_answer=answer_text,
-                correct_answer=str(correct_answer)[:5000] if correct_answer else None,
+
+            # 检查同一 item 是否已有错题条目（更新而非新建）
+            existing_wb = await self._session.execute(
+                select(WrongBookEntry).where(
+                    WrongBookEntry.user_id == user_id,
+                    WrongBookEntry.item_id == item_id,
+                ),
             )
-            self._session.add(entry)
-            wrong_book_created = True
+            existing_wb = existing_wb.scalar_one_or_none()
+
+            source_kind = item.source_kind or ""
+            source_label = item.source_label or ""
+            pub = item.public_snapshot or {}
+
+            if existing_wb is not None:
+                existing_wb.last_error_at = now_ts
+                existing_wb.error_count = (existing_wb.error_count or 1) + 1
+                existing_wb.last_score = score
+                existing_wb.last_max_score = max_score
+                existing_wb.wrong_answer = answer_text
+                existing_wb.submission_id = submission.id
+                existing_wb.grade_id = grade.id
+                existing_wb.status = "pending"
+                wrong_book_created = True
+            else:
+                entry = WrongBookEntry(
+                    user_id=user_id,
+                    item_id=item_id,
+                    submission_id=submission.id,
+                    grade_id=grade.id,
+                    question_type=item.question_type,
+                    stem_snapshot=item.stem,
+                    wrong_answer=answer_text,
+                    correct_answer=str(correct_answer)[:5000] if correct_answer else None,
+                    status="pending",
+                    source_kind=source_kind or pub.get("source_kind"),
+                    source_label=source_label or pub.get("source_label"),
+                    knowledge_point_id=knowledge_point,
+                    first_error_at=now_ts,
+                    last_error_at=now_ts,
+                    error_count=1,
+                    last_score=score,
+                    last_max_score=max_score,
+                )
+                self._session.add(entry)
+                wrong_book_created = True
 
         # ---- 9. 标记幂等完成 ----
         response_data = SubmitAnswerResponse(

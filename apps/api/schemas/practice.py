@@ -159,7 +159,7 @@ class KnowledgePointPerformance(BaseModel):
 
 
 class GradeInfo(BaseModel):
-    """公开评分信息 — 对齐 api(6).ts GradeInfo 的公开子集。"""
+    """公开评分信息 — 对齐 api(6).ts GradeInfo。不含 step_scores（隐私规则）。"""
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -168,6 +168,10 @@ class GradeInfo(BaseModel):
     max_score: float
     confidence: float
     review_required: bool
+    explanation: str | None = None
+    source_refs: list = Field(default_factory=list)
+    status: str = "confirmed"
+    created_at: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -196,5 +200,82 @@ class PracticeSessionListParams(BaseModel):
     status: str | None = None
     chapter_id: str | None = None
     knowledge_point_id: str | None = None
+    started_from: str | None = None
+    started_to: str | None = None
+
+
+# ============================================================
+# 错题本
+# ============================================================
+
+WrongBookStatus = Literal["pending", "reviewing", "mastered"]
+
+
+class WrongBookEntry(BaseModel):
+    """错题条目 — 对齐 api(6).ts WrongBookEntry。"""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    user_id: str
+    question_id: str
+    question_stem: str
+    question_type: str
+    source_kind: str = ""
+    source_label: str = ""
+    knowledge_point_id: str = ""
+    status: str = "pending"
+    first_error_at: str | None = None
+    last_error_at: str | None = None
+    error_count: int = 1
+    last_score: float | None = None
+    last_max_score: float | None = None
+    next_review_at: str | None = None
+    note: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class WrongBookListParams(BaseModel):
+    """错题本查询参数 — 对齐 api(6).ts WrongBookListParams。"""
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
+    status: str | None = None
+    chapter_id: str | None = None
+    knowledge_point_id: str | None = None
+
+
+class UpdateWrongBookRequest(BaseModel):
+    """更新错题条目 — 对齐 api(6).ts UpdateWrongBookRequest。"""
+    status: Literal["pending", "reviewing"] | None = None
+    note: str | None = None
+
+
+# ============================================================
+# 学习摘要
+# ============================================================
+
+class MasteryRecord(BaseModel):
+    """掌握度记录 — 对齐 api(6).ts MasteryRecord。"""
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    knowledge_point_id: str
+    mastery: float
+    streaks: int = 0
+    reason: str | None = None
+    updated_at: str | None = None
+
+
+class LearningSummary(BaseModel):
+    """学习摘要 — 对齐 api(6).ts LearningSummary。"""
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    mastery_records: list[MasteryRecord] = Field(default_factory=list)
+    pending_wrong_count: int = 0
+    reviewing_wrong_count: int = 0
+    recent_accuracy: float | None = None
+    recent_session_count: int | None = None
+    summary_text: str | None = None
     started_from: str | None = None
     started_to: str | None = None
