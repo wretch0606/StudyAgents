@@ -260,6 +260,12 @@ async def _run_main(check_only: bool, database_url: str = "") -> None:
     setup_logging()
 
     registry = HandlerRegistry()
+
+    # 注册入库任务处理器
+    from apps.worker.ingestion.pipeline import IngestionPipeline, IngestionHandler
+    ingestion_handler = IngestionHandler()
+    registry.register("validate", ingestion_handler)
+
     worker = Worker(registry)
 
     if check_only:

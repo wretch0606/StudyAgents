@@ -5,7 +5,7 @@ Issue #8 最小实现：不含 page/chunk 子表（由 B 后续扩展）。
 
 from __future__ import annotations
 
-from sqlalchemy import Integer, String
+from sqlalchemy import Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +23,7 @@ class Document(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_path: Mapped[str | None] = mapped_column("file_path", Text, nullable=True)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     created_at = created_at_col()
     updated_at = updated_at_col()

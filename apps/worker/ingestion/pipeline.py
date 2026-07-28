@@ -89,8 +89,8 @@ class IngestionPipeline:
     async def _do_extract(self, job: IngestionJob):
         await self.job_mgr.update_progress(job.job_id, IngestionStage.EXTRACTING, 5.0)
 
-        sample_pdf = _find_sample_pdf()
-        pages = self.parser.parse(str(sample_pdf), job.document_id)
+        file_path = self._get(job.job_id, "file_path") or _find_sample_pdf()
+        pages = self.parser.parse(str(file_path), job.document_id)
         self._set(job.job_id, "pages", pages)
 
         await self.job_mgr.update_progress(
@@ -190,3 +190,59 @@ def _find_sample_pdf() -> Path:
         if p.exists():
             return p.resolve()
     raise FileNotFoundError("样例 PDF 不存在，请先运行 generate_sample_pdf.py")
+
+
+class IngestionHandler:
+    """Worker handler — 将 IngestionPipeline 适配为 PipelineHandler 协议。
+
+    从 WorkerTask.payload 中提取 document_id，查询文件路径，驱动入库管线。
+    """
+
+    async def handle(self, task):
+        from apps.worker.pipeline import WorkerResult
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        document_id = task.payload.get("document_id", "") if task.payload else ""
+        if not document_id:
+            return WorkerResult(
+                task_id=task.task_id, success=False,
+                error_code="MISSING_DOCUMENT_ID",
+                error_message="task payload 缺少 document_id",
+            )
+
+        # 从数据库查询文件路径
+        from apps.api.db.session import _get_sessionmaker
+        from apps.api.db.models.document import Document as ApiDocument
+        from apps.worker.ingestion.job_manager import JobManager
+
+        file_path = None
+        async with _get_sessionmaker()() as db_session:
+            result = await db_session.execute(
+                select(ApiDocument).where(ApiDocument.id == document_id),
+            )
+            doc = result.scalar_one_or_none()
+            if doc is not None and doc.file_path:
+                file_path = doc.file_path
+
+        if not file_path:
+            return WorkerResult(
+                task_id=task.task_id, success=False,
+                error_code="MISSING_FILE_PATH",
+                error_message=f"文档 {document_id} 没有持久化文件路径",
+            )
+
+        # 驱动入库管线（每个阶段使用独立 DB 会话）
+        async with _get_sessionmaker()() as db_session:
+            job_mgr = JobManager(db_session)
+            pipeline = IngestionPipeline(job_manager=job_mgr)
+            pipeline._set(task.task_id, "file_path", file_path)
+
+            from apps.worker.schemas import IngestionJob as BIngestionJob, IngestionStage
+            b_job = BIngestionJob(
+                job_id=task.task_id, document_id=document_id,
+                stage=IngestionStage.EXTRACTING,
+            )
+            await pipeline.run(b_job)
+
+        return WorkerResult(task_id=task.task_id, success=True, output={})

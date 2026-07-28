@@ -138,7 +138,7 @@ async def upload_document(
     now = datetime.now(UTC).replace(tzinfo=None)
     doc = Document(
         name=filename, sha256=sha256, mime=content_type, status="pending",
-        version=1, created_at=now, updated_at=now,
+        version=1, file_path=file_path, created_at=now, updated_at=now,
     )
     session.add(doc)
     await session.flush()
