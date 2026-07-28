@@ -7,10 +7,12 @@
 //   2. 中间：PDF/OCR 导入入口 + 含拒答场景的 Mock 对话
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
-import { ref, nextTick, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../stores/useChatStore'
+import { useWrongBookStore } from '../stores/useWrongBookStore'
+import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
 import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
@@ -22,6 +24,7 @@ import { renderMixedHtml } from '../utils/katex-renderer'
 // =========================================================
 
 const chatStore = useChatStore()
+const wrongBookStore = useWrongBookStore()
 // 仅提取 Home.vue 模板直接使用的状态（AgentDrawer 自行从 Store 读取）
 const { messages, isStreaming, attachments } = storeToRefs(chatStore)
 
@@ -55,10 +58,19 @@ watch(
   },
 )
 
+const router = useRouter()
+
 function switchMode(mode: NavMode) {
   navMode.value = mode
+
+  // 同步路由 query，确保顶部导航栏与左侧菜单栏路由一致
   if (mode === 'chat') {
     drawerOpen.value = true
+    router.replace({ path: '/', query: {} })
+  } else if (mode === 'practice') {
+    router.replace({ path: '/', query: { mode: 'practice' } })
+  } else if (mode === 'wrongbook') {
+    router.replace({ path: '/', query: { mode: 'wrongbook' } })
   }
 }
 
@@ -110,7 +122,23 @@ const evaluationReport = ref<{
   highlights: string[]
 } | null>(null)
 
-/** 提交答案 → 触发 Evaluator 评测 */
+/** 章节中文标签（computed） */
+const chapterLabel = computed(() => {
+  switch (selectedChapter.value) {
+    case 'ch3': return '第 3 章 · 运输层'
+    case 'ch4': return '第 4 章 · 网络层'
+    case 'ch5': return '第 5 章 · 链路层'
+    default: return ''
+  }
+})
+
+/** 当前题目题干（纯文本，用于错题本存储） */
+const currentQuestionText = computed(() => {
+  // 与模板中 .pqc-prompt 内容保持同步（去除 HTML 标签后的纯文本）
+  return '请简述 TCP 拥塞控制中慢启动与拥塞避免两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。'
+})
+
+/** 提交答案 → 触发 Evaluator 评测 + 低分自动沉淀至错题本 */
 async function submitAnswer() {
   if (isEvaluating.value || isSubmitted.value) return
   isEvaluating.value = true
@@ -119,9 +147,83 @@ async function submitAnswer() {
     const report = await chatStore.submitAnswerForEvaluation()
     evaluationReport.value = report
     isSubmitted.value = true
+
+    // ---- 错题沉淀：得分 < 80 自动收录 ----
+    if (report.score < 80) {
+      wrongBookStore.addEntry({
+        chapter: selectedChapter.value,
+        chapterLabel: chapterLabel.value,
+        question: currentQuestionText.value,
+        userAnswer: trainingAnswer.value,
+        score: report.score,
+        total: report.total,
+        analysis: report.analysis,
+        highlights: report.highlights,
+      })
+    }
   } finally {
     isEvaluating.value = false
   }
+}
+
+// =========================================================
+// 错题本 — 展开/折叠状态
+// =========================================================
+
+/** 当前展开查看详情的错题 ID（null = 全部折叠） */
+const expandedWrongId = ref<string | null>(null)
+
+/** 切换错题卡片的展开/折叠状态 */
+function toggleWrongEntry(id: string) {
+  expandedWrongId.value = expandedWrongId.value === id ? null : id
+}
+
+/** 截断文本（用于错题卡片简述） */
+function truncateText(text: string, maxLen: number): string {
+  const cleaned = text.replace(/<[^>]+>/g, '')
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '…' : cleaned
+}
+
+/** 格式化 ISO 时间为可读字符串 */
+function formatWrongDate(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return '刚刚'
+  if (diffMin < 60) return `${diffMin} 分钟前`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr} 小时前`
+  const diffDay = Math.floor(diffHr / 24)
+  if (diffDay < 7) return `${diffDay} 天前`
+  return d.toLocaleDateString('zh-CN')
+}
+
+/** 根据得分返回 CSS class */
+function wrongScoreClass(score: number): string {
+  if (score >= 80) return 'wb-score-high'
+  if (score >= 60) return 'wb-score-mid'
+  return 'wb-score-low'
+}
+
+/** 根据评测细项前缀返回 CSS class */
+function wrongHighlightClass(item: string): string {
+  if (item.startsWith('✅')) return 'hl-good'
+  if (item.startsWith('⚠️')) return 'hl-warn'
+  return 'hl-tip'
+}
+
+/** 点击错题「重新练习」→ 跳转至专项训练并预填章节 */
+function retryWrongQuestion(entry: WrongBookEntry) {
+  selectedChapter.value = entry.chapter
+  navMode.value = 'practice'
+  // 下一帧自动展开训练表单
+  nextTick(() => {
+    isTraining.value = false
+    isSubmitted.value = false
+    evaluationReport.value = null
+    trainingAnswer.value = ''
+  })
 }
 
 // =========================================================
@@ -161,7 +263,26 @@ const masteryRecords = ref<MasteryRecord[]>([
 ])
 
 const overallMastery = ref(0.64)
-const pendingWrongCount = ref(7)
+
+/** 错题本徽标数 — 动态响应 store 实际长度 */
+const pendingWrongCount = computed(() => wrongBookStore.count)
+
+/** 错题本章节筛选 */
+const wrongBookFilter = ref('all')
+
+/** 筛选后的错题列表 */
+const filteredWrongEntries = computed(() => {
+  const list = wrongBookStore.sortedEntries
+  if (!wrongBookFilter.value || wrongBookFilter.value === 'all') return list
+  return list.filter((e) => e.chapter === wrongBookFilter.value)
+})
+
+/** 章节 key → 中文标签映射（供筛选下拉和卡片使用） */
+const chapterLabelMap: Record<string, string> = {
+  ch3: '第 3 章 · 运输层',
+  ch4: '第 4 章 · 网络层',
+  ch5: '第 5 章 · 链路层',
+}
 
 // =========================================================
 // 用户输入 & 发送（已接入 SSE 流式打字机模拟）
@@ -443,14 +564,19 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           <!-- 错题本模式下的筛选 -->
           <template v-if="navMode === 'wrongbook'">
             <el-select
-              model-value="all"
+              v-model="wrongBookFilter"
               size="small"
               class="header-select"
-              placeholder="知识点筛选"
+              placeholder="章节筛选"
+              clearable
             >
-              <el-option label="全部知识点" value="all" />
-              <el-option label="TCP 协议" value="kp1" />
-              <el-option label="IP 与路由" value="kp2" />
+              <el-option label="全部章节" value="all" />
+              <el-option
+                v-for="(count, ch) in wrongBookStore.countByChapter"
+                :key="ch"
+                :value="ch"
+                :label="`${chapterLabelMap[ch] || ch} (${count})`"
+              />
             </el-select>
           </template>
 
@@ -471,29 +597,97 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
 
       <!-- 错题本视图 -->
       <template v-if="navMode === 'wrongbook'">
-        <el-scrollbar class="wrongbook-scroll">
+        <!-- 完全空状态 -->
+        <div v-if="wrongBookStore.count === 0" class="wrongbook-empty">
+          <svg class="wrongbook-empty-icon" viewBox="0 0 64 64" fill="none">
+            <rect x="12" y="8" width="40" height="48" rx="6" stroke="var(--text)" stroke-width="1.5" opacity="0.3" />
+            <path d="M22 24h14M22 32h20M22 40h8" stroke="var(--text)" stroke-width="1.5" stroke-linecap="round" opacity="0.2" />
+            <circle cx="46" cy="46" r="12" fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" />
+            <path d="M46 42v8m-4-4h8" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" opacity="0.5" />
+          </svg>
+          <h3 class="wrongbook-empty-title">错题本为空</h3>
+          <p class="wrongbook-empty-desc">完成专项训练后，得分低于 80 分的题目会自动收录到错题本，方便你针对性复习薄弱知识点。</p>
+        </div>
+
+        <!-- 筛选无匹配 -->
+        <div v-else-if="filteredWrongEntries.length === 0" class="wrongbook-empty">
+          <h3 class="wrongbook-empty-title">无匹配结果</h3>
+          <p class="wrongbook-empty-desc">当前章节筛选条件下没有错题，请切换筛选或清除筛选条件。</p>
+        </div>
+
+        <!-- 错题列表 -->
+        <el-scrollbar v-else class="wrongbook-scroll">
           <div class="wrongbook-inner">
-            <div class="wrongbook-card" v-for="i in 3" :key="'wb-' + i">
-              <div class="wb-status" :class="i === 1 ? 'pending' : i === 2 ? 'reviewing' : 'mastered'">
-                {{ i === 1 ? '待复习' : i === 2 ? '复习中' : '已掌握' }}
+            <div
+              v-for="entry in filteredWrongEntries"
+              :key="entry.id"
+              :class="['wrongbook-card', { expanded: expandedWrongId === entry.id }]"
+            >
+              <!-- 折叠态：一行摘要 -->
+              <div class="wb-card-row" @click="toggleWrongEntry(entry.id)">
+                <div class="wb-card-left">
+                  <span class="wb-chapter-tag">{{ entry.chapterLabel }}</span>
+                  <span class="wb-question-brief">{{ truncateText(entry.question, 50) }}</span>
+                </div>
+                <div class="wb-card-right">
+                  <span :class="['wb-score-pill', wrongScoreClass(entry.score)]">
+                    {{ entry.score }}<span class="wb-score-sep">/</span>{{ entry.total }}
+                  </span>
+                  <span class="wb-time">{{ formatWrongDate(entry.createdAt) }}</span>
+                  <svg
+                    :class="['wb-chevron', { open: expandedWrongId === entry.id }]"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                  </svg>
+                </div>
               </div>
-              <p class="wb-question">
-                {{
-                  i === 1
-                    ? '某主机 IP 地址为 192.168.1.37/28，请计算该子网的网络地址、广播地址和可用 IP 范围。'
-                    : i === 2
-                      ? 'TCP 拥塞控制中，若当前 cwnd = 24 MSS，ssthresh = 16 MSS，收到 3 个重复 ACK 后，cwnd 和 ssthresh 分别变为多少？'
-                      : 'HTTP/2 相比 HTTP/1.1 在性能方面做了哪些关键改进？请至少列出三项。'
-                }}
-              </p>
-              <div class="wb-meta">
-                <span class="wb-source">来源：{{ i === 3 ? '计算机网络.pdf 第 89 页' : '计算机网络.pdf' }}</span>
-                <span class="wb-kp">知识点：{{ i === 1 ? 'IP 与路由' : i === 2 ? 'TCP 协议' : 'HTTP/HTTPS' }}</span>
-                <span class="wb-count">错误 {{ i === 1 ? 3 : i === 2 ? 2 : 1 }} 次</span>
-              </div>
-              <div class="wb-actions">
-                <el-button size="small" type="primary" plain>重新练习</el-button>
-                <el-button size="small" plain>查看解析</el-button>
+
+              <!-- 展开态：完整详情 -->
+              <div v-if="expandedWrongId === entry.id" class="wb-card-detail">
+                <!-- 题目 -->
+                <div class="wb-detail-block">
+                  <h4 class="wb-detail-label">📋 题目</h4>
+                  <div class="wb-detail-content" v-html="renderMixedHtml(entry.question)" />
+                </div>
+
+                <!-- 你的作答 -->
+                <div class="wb-detail-block">
+                  <h4 class="wb-detail-label">✏️ 你的作答</h4>
+                  <div class="wb-detail-content" v-html="renderMixedHtml(entry.userAnswer || '（未作答）')" />
+                </div>
+
+                <!-- 评测报告 -->
+                <div class="wb-detail-block">
+                  <h4 class="wb-detail-label">📊 评测报告</h4>
+                  <div class="wb-detail-score-row">
+                    <span class="wb-detail-score-label">得分：</span>
+                    <span :class="['wb-score-pill', 'wb-score-pill-lg', wrongScoreClass(entry.score)]">
+                      {{ entry.score }} / {{ entry.total }}
+                    </span>
+                  </div>
+                  <div class="wb-detail-content" v-html="renderMixedHtml(entry.analysis)" />
+                  <ul class="wb-detail-highlights">
+                    <li
+                      v-for="(item, hi) in entry.highlights"
+                      :key="hi"
+                      :class="['pqc-hl-item', wrongHighlightClass(item)]"
+                    >
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="wb-detail-actions">
+                  <el-button size="small" type="primary" plain @click.stop="retryWrongQuestion(entry)">
+                    🔄 重新练习
+                  </el-button>
+                  <el-button size="small" type="danger" plain @click.stop="wrongBookStore.removeEntry(entry.id)">
+                    🗑 删除
+                  </el-button>
+                </div>
               </div>
             </div>
           </div>
@@ -1240,77 +1434,343 @@ export function renderMarkdownLine(line: string): string {
 }
 
 .wrongbook-inner {
-  max-width: 760px;
+  max-width: 780px;
   margin: 0 auto;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
+/* ---- 空状态 ---- */
+.wrongbook-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  text-align: center;
+}
+
+.wrongbook-empty-icon {
+  width: 72px;
+  height: 72px;
+  margin-bottom: 18px;
+}
+
+.wrongbook-empty-title {
+  font-family: var(--heading);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 8px;
+}
+
+.wrongbook-empty-desc {
+  font-size: 14px;
+  color: var(--text);
+  max-width: 420px;
+  line-height: 1.6;
+  margin: 0;
+  opacity: 0.6;
+}
+
+/* ---- 错题卡片（暗色系列）---- */
 .wrongbook-card {
-  padding: 18px 20px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border, #2e303a);
   border-radius: 12px;
-  background: var(--code-bg);
+  background: var(--code-bg, #1f2028);
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-.wb-status {
-  display: inline-block;
+.wrongbook-card:hover {
+  border-color: var(--accent-border, rgba(192, 132, 252, 0.35));
+}
+
+.wrongbook-card.expanded {
+  border-color: var(--accent-border, rgba(192, 132, 252, 0.55));
+  box-shadow: 0 0 0 3px var(--accent-bg, rgba(170, 59, 255, 0.06));
+}
+
+/* ---- 折叠行 ---- */
+.wb-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wb-card-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.wb-chapter-tag {
   font-size: 11px;
   font-weight: 700;
-  padding: 2px 10px;
-  border-radius: 10px;
-  margin-bottom: 10px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--accent-bg, rgba(170, 59, 255, 0.1));
+  color: var(--accent, #aa3bff);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.wb-status.pending {
-  background: rgba(239, 68, 68, 0.12);
-  color: #ef4444;
+.wb-question-brief {
+  font-size: 13.5px;
+  color: var(--text-h, #f3f4f6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
-.wb-status.reviewing {
-  background: rgba(245, 158, 11, 0.12);
-  color: #f59e0b;
+.wb-card-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
-.wb-status.mastered {
+.wb-score-pill {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.wb-score-pill.wb-score-high {
   background: rgba(52, 211, 153, 0.12);
   color: #34d399;
 }
 
-.wb-question {
-  font-size: 15px;
-  color: var(--text-h);
-  margin: 0 0 12px;
-  line-height: 1.65;
+.wb-score-pill.wb-score-mid {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
 }
 
-.wb-meta {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--text);
-  margin-bottom: 12px;
+.wb-score-pill.wb-score-low {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
 }
 
-.wb-source {
+.wb-score-pill-lg {
+  font-size: 18px;
+  padding: 4px 14px;
+  border-radius: 10px;
+}
+
+.wb-score-sep {
+  opacity: 0.45;
+  font-weight: 400;
+  margin: 0 1px;
+}
+
+.wb-time {
+  font-size: 11px;
+  color: var(--text, #6b6375);
+  opacity: 0.55;
+  white-space: nowrap;
+}
+
+.wb-chevron {
+  width: 18px;
+  height: 18px;
+  color: var(--text, #6b6375);
+  opacity: 0.45;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.wb-chevron.open {
+  transform: rotate(180deg);
   opacity: 0.7;
 }
 
-.wb-kp {
-  color: var(--accent);
+/* ---- 展开详情 ---- */
+.wb-card-detail {
+  padding: 4px 18px 18px;
+  border-top: 1px solid var(--border, #2e303a);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: wb-fade-in 0.2s ease;
 }
 
-.wb-count {
-  color: #f87171;
+@keyframes wb-fade-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.wb-detail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-detail-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-h, #f3f4f6);
+  margin: 0;
+}
+
+.wb-detail-content {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text-h, #f3f4f6);
+  padding: 12px 16px;
+  background: var(--bg, #16171d);
+  border-radius: 8px;
+  border: 1px solid var(--border, #2e303a);
+}
+
+/* KaTeX 公式在详情区内的微调 */
+.wb-detail-content :deep(.katex-display) {
+  margin: 10px 0;
+}
+
+.wb-detail-content :deep(.katex) {
+  font-size: 1.05em;
+}
+
+.wb-detail-content :deep(.katex-error) {
+  color: #fca5a5 !important;
+  border-bottom-color: #fca5a5;
+}
+
+.wb-detail-score-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wb-detail-score-label {
+  font-size: 13px;
   font-weight: 600;
+  color: var(--text, #9ca3af);
 }
 
-.wb-actions {
+.wb-detail-highlights {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wb-detail-highlights .pqc-hl-item {
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+
+.wb-detail-highlights .pqc-hl-item.hl-good {
+  background: rgba(52, 211, 153, 0.08);
+  color: #34d399;
+}
+
+.wb-detail-highlights .pqc-hl-item.hl-warn {
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+}
+
+.wb-detail-highlights .pqc-hl-item.hl-tip {
+  background: rgba(96, 165, 250, 0.08);
+  color: #93c5fd;
+}
+
+.wb-detail-actions {
   display: flex;
   gap: 8px;
+  padding-top: 4px;
+}
+
+/* 深色模式 */
+@media (prefers-color-scheme: dark) {
+  .wrongbook-card {
+    background: var(--code-bg, #1f2028);
+    border-color: var(--border, #2e303a);
+  }
+
+  .wrongbook-card.expanded {
+    border-color: rgba(192, 132, 252, 0.45);
+  }
+
+  .wb-detail-content {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+  }
+
+  .wrongbook-empty-icon [stroke],
+  .wrongbook-empty-icon [fill] {
+    /* SVG 继承 CSS 变量 */
+  }
+}
+
+/* 移动端 */
+@media (max-width: 768px) {
+  .wrongbook-inner {
+    max-width: 100%;
+    padding: 14px 12px;
+    gap: 8px;
+  }
+
+  .wb-card-row {
+    padding: 12px 14px;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .wb-card-left {
+    flex: 2;
+  }
+
+  .wb-card-right {
+    gap: 8px;
+  }
+
+  .wb-question-brief {
+    font-size: 12.5px;
+  }
+
+  .wb-score-pill {
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+
+  .wb-card-detail {
+    padding: 4px 14px 16px;
+    gap: 12px;
+  }
+
+  .wb-detail-content {
+    font-size: 13px;
+    padding: 10px 12px;
+  }
+
+  .wrongbook-empty {
+    padding: 40px 16px;
+  }
+
+  .wrongbook-empty-title {
+    font-size: 18px;
+  }
+
+  .wrongbook-empty-desc {
+    font-size: 13px;
+    max-width: 100%;
+  }
 }
 
 /* --- 专项训练占位 --- */
@@ -2538,16 +2998,6 @@ export function renderMarkdownLine(line: string): string {
     margin-top: 4px;
     font-size: 10px;
     text-align: center;
-  }
-
-  /* ---- 错题本视图 ---- */
-  .wrongbook-inner {
-    max-width: 100%;
-    padding: 14px 12px;
-  }
-
-  .wb-meta {
-    gap: 10px;
   }
 
   /* ---- 专项训练占位 ---- */

@@ -67,7 +67,7 @@ function handleLogout() {
         <router-link to="/?mode=practice" class="nav-link" active-class="nav-link--active">
           训练
         </router-link>
-        <router-link to="/wrong-book" class="nav-link" active-class="nav-link--active">
+        <router-link to="/?mode=wrongbook" class="nav-link" active-class="nav-link--active">
           错题本
         </router-link>
         <router-link
