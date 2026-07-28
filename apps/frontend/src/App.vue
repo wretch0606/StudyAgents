@@ -64,7 +64,7 @@ function handleLogout() {
         <router-link to="/" class="nav-link" active-class="nav-link--active" exact>
           问答
         </router-link>
-        <router-link to="/training" class="nav-link" active-class="nav-link--active">
+        <router-link to="/?mode=practice" class="nav-link" active-class="nav-link--active">
           训练
         </router-link>
         <router-link to="/wrong-book" class="nav-link" active-class="nav-link--active">

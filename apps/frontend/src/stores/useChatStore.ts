@@ -418,6 +418,130 @@ export const useChatStore = defineStore('chat', () => {
     currentAgentTraces.value = []
   }
 
+  /**
+   * 专项训练模式 — 初始化 Agent 执行轨迹。
+   *
+   * 训练生命周期：
+   *   Coordinator → Knowledge → Questioner → (用户作答) → Evaluator
+   *
+   * 调用时机：用户点击「开始训练」后立即调用。
+   * 此时前三个 Agent 已完成（生成了题目），Evaluator 处于待命状态。
+   */
+  function initPracticeTraces(): void {
+    clearAgentTraces()
+
+    const traces: AgentTrace[] = [
+      {
+        agentRole: 'coordinator',
+        agentLabel: '🧠 Coordinator',
+        status: 'succeeded',
+        summary: '意图解析完成：识别为专项训练请求，已调度 Knowledge Agent 检索课程资料',
+        action: '意图解析完成：识别为专项训练请求，已调度 Knowledge Agent 检索课程资料',
+        durationMs: 420,
+      },
+      {
+        agentRole: 'knowledge',
+        agentLabel: '📚 Knowledge',
+        status: 'succeeded',
+        summary: '检索完成：已从课程资料库提取 3 个相关知识点，交由 Questioner 生成题目',
+        action: '检索完成：已从课程资料库提取 3 个相关知识点，交由 Questioner 生成题目',
+        durationMs: 850,
+      },
+      {
+        agentRole: 'questioner',
+        agentLabel: '❓ Questioner',
+        status: 'succeeded',
+        summary: '题目生成完毕：已基于检索材料生成 1 道综合问答题，等候用户作答',
+        action: '题目生成完毕：已基于检索材料生成 1 道综合问答题，等候用户作答',
+        durationMs: 610,
+      },
+      {
+        agentRole: 'evaluator',
+        agentLabel: '⚖️ Evaluator',
+        status: 'idle',
+        summary: '待命中：等待用户提交答案后进行评测与打分',
+        action: '待命中：等待用户提交答案后进行评测与打分',
+        durationMs: 0,
+      },
+    ]
+
+    currentAgentTraces.value = [...traces]
+    // 训练模式下不设置 isStreaming（不触发消息流式输出动画）
+  }
+
+  /**
+   * 专项训练模式 — 提交答案触发 Evaluator 评测。
+   *
+   * 时序：
+   *   1. 立即将 Evaluator 设为 running（摘要：「正在分析作答…」）
+   *   2. ~1.5s 后将 Evaluator 设为 succeeded（摘要含得分 + 解析）
+   *   3. 将成功的 traces 归档到 agentSteps（供历史回放）
+   *
+   * @returns Promise，评测完成后 resolve 评测报告对象
+   */
+  function submitAnswerForEvaluation(): Promise<{
+    score: number
+    total: number
+    analysis: string
+    highlights: string[]
+  }> {
+    return new Promise((resolve) => {
+      const traces = currentAgentTraces.value.length > 0
+        ? [...currentAgentTraces.value]
+        : []
+
+      // 确保 Evaluator 存在
+      const evaluator = traces.find((t) => t.agentRole === 'evaluator')
+      if (!evaluator) return
+
+      // ---- 阶段 1：立即切换 Evaluator → running ----
+      evaluator.status = 'running'
+      evaluator.summary = '正在分析作答内容，比对课程知识点，评估回答质量…'
+      evaluator.action = '正在分析作答内容，比对课程知识点，评估回答质量…'
+      evaluator.durationMs = 0
+      currentAgentTraces.value = [...traces]
+      isStreaming.value = true
+
+      // ---- 阶段 2：~1.5s 后 Evaluator → succeeded ----
+      setTimeout(() => {
+        evaluator.status = 'succeeded'
+        evaluator.summary = '评测完成：得分 85/100，回答涵盖了核心概念，公式推导存在一处符号错误'
+        evaluator.action = '评测完成：得分 85/100，回答涵盖了核心概念，公式推导存在一处符号错误'
+        evaluator.durationMs = 1500
+        currentAgentTraces.value = [...traces]
+
+        // 归档到 agentSteps（供历史回放）
+        agentSteps.value = traces.map((t) => ({
+          agentRole: t.agentRole,
+          agentLabel: t.agentLabel,
+          status: t.status as 'idle' | 'running' | 'succeeded' | 'failed',
+          summary: t.summary,
+          detail: t.action,
+          durationMs: t.durationMs,
+        }))
+
+        isStreaming.value = false
+
+        resolve({
+          score: 85,
+          total: 100,
+          analysis:
+            '你的回答正确阐述了慢启动（cwnd 指数增长）与拥塞避免（cwnd 线性增长）的核心区别。' +
+            '慢启动阶段 cwnd 公式 $cwnd_{n+1} = 2 \\cdot cwnd_n$ 表意基本正确。' +
+            '建议补充：慢启动阈值（ssthresh）的作用，以及拥塞避免阶段的具体公式 $cwnd_{new} = cwnd + MSS$。' +
+            '整体结构清晰，关键概念准确，达到 85 分水平。',
+          highlights: [
+            '✅ 慢启动与拥塞避免的核心区别表述准确',
+            '✅ cwnd 增长率公式方向正确',
+            '⚠️ 缺少 ssthresh 阈值的说明',
+            '⚠️ 拥塞避免阶段线性增长公式未给出',
+            '📝 建议补充 TCP Tahoe 与 Reno 版本差异',
+          ],
+        })
+      }, 1500)
+    })
+  }
+
   // ==========================================================
   // 导出
   // ==========================================================
@@ -448,5 +572,7 @@ export const useChatStore = defineStore('chat', () => {
     removeAttachment,
     clearAttachments,
     clearAgentTraces,
+    initPracticeTraces,
+    submitAnswerForEvaluation,
   }
 })
