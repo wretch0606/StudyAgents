@@ -22,6 +22,8 @@
 - `case.schema.json`：单条样本的字段约束。
 - `policies.json`：不含标准答案的公共评分口径和质量门槛。
 - `evaluate.py`：数据校验、Recall@5、人工指标汇总和缺陷清单生成器。
+- `run_live.py`：使用真实文本、视觉和 Embedding 服务执行 50 条本机评测。
+- `create_annotation_packets.py`：按 B/C/E 分工生成私有人工标注包。
 - `templates/`：系统结果、双人标注和运行快照示例。
 - `reports/baseline.md`：当前可用模块下的基线状态，不伪造尚未产生的指标。
 
@@ -59,10 +61,22 @@
 ## 执行流程
 
 1. 按 `docs/COURSE_MATERIALS.md` 在本地准备资料，不提交原文件。
-2. 固定代码提交、资料提交、模型、提示词和检索参数，填写运行快照。
-3. 对 50 条输入运行系统，将结果导出为 JSONL。
-4. 每条关键样本由两个不同成员独立标注；A 处理分歧，不允许同一人重复计数。
-5. 生成报告和缺陷清单：
+2. 在本机 `.env` 配置模型与 Embedding 服务；不得提交或打印密钥。
+3. 运行真实服务评测。脚本会固定代码提交、资料提交、模型、提示词和检索参数，
+   并把原始回答保存到 Git 忽略目录：
+
+```powershell
+python tests/evaluation/run_live.py
+```
+
+4. 生成按角色分开的私有标注包：
+
+```powershell
+python tests/evaluation/create_annotation_packets.py
+```
+
+5. 每条关键样本由两个不同成员独立标注；A 处理分歧，不允许同一人重复计数。
+6. 生成报告和缺陷清单：
 
 ```powershell
 python tests/evaluation/evaluate.py validate
@@ -76,6 +90,13 @@ python tests/evaluation/evaluate.py report `
 
 没有 C/D/E 的真实输出或关键样本双人标注时，报告必须保持 `INCOMPLETE`，
 不得把空值、示例数据或单人判断写成达标结果。
+
+如需单独复现某条失败样本，可执行：
+
+```powershell
+python tests/evaluation/run_live.py --case-id db-001 `
+  --output-dir .local-data/evaluation-db-001
+```
 
 ## 双人标注分工
 
