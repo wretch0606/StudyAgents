@@ -14,6 +14,7 @@ import { useChatStore } from '../stores/useChatStore'
 import { useWrongBookStore } from '../stores/useWrongBookStore'
 import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
+import { ElMessage } from 'element-plus'
 import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
@@ -444,8 +445,9 @@ async function handleChatFileChange(e: Event) {
       uploadStatus: 'done',
     })
   } catch {
-    // 上传失败
+    // 上传失败 → 更新附件状态 + 明确提示用户
     chatStore.updateAttachment(localId, { uploadStatus: 'failed' })
+    ElMessage.error(`文件 "${file.name}" 上传失败，请检查网络后重试`)
   } finally {
     chatUploading.value = false
     // 重置 input 以便重复选择同一文件
