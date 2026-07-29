@@ -110,10 +110,9 @@ async def test_fake_adapter_different_schemas() -> None:
 @pytest.mark.asyncio
 async def test_openai_adapter_missing_config() -> None:
     """当配置缺失时抛出 MODEL_CONFIG_MISSING。"""
-    from apps.api.services.model_gateway import OpenAIAdapter
-
     # 隔离 .env 中的真实 API key：临时覆盖 settings 值
     import apps.api.config as _cfg
+    from apps.api.services.model_gateway import OpenAIAdapter
     old_base = _cfg.settings.model_base_url
     old_key = _cfg.settings.model_api_key
     _cfg.settings.model_base_url = ""

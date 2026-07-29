@@ -203,7 +203,7 @@ async def coordinator_node(
             intent="qa_ask",
             normalized_query=user_input.strip(),
             filters=state.get("filters", {}),
-            next_node="knowledge",
+            next_node="knowledge_agent",
             public_summary="协调 Agent 识别为自由问答模式，路由至知识 Agent",
         )
     else:
@@ -479,7 +479,7 @@ async def error_node(
 
 def _error_return(state: AgentState, code: str, message: str, retryable: bool) -> dict:
     return {
-        "next_node": "error",
+        "next_node": "error_handler",
         "error": {
             "code": code,
             "message": message,
@@ -563,30 +563,30 @@ def build_qa_graph():
     builder = StateGraph(AgentState)
 
     builder.add_node("coordinator", coordinator_node)
-    builder.add_node("knowledge", knowledge_node)
+    builder.add_node("knowledge_agent", knowledge_node)
     builder.add_node("evaluator_qa", evaluator_qa_node)
     builder.add_node("refusal", refusal_node)
-    builder.add_node("error", error_node)
+    builder.add_node("error_handler", error_node)
 
     builder.set_entry_point("coordinator")
 
     builder.add_conditional_edges("coordinator", _route, {
-        "knowledge": "knowledge",
+        "knowledge_agent": "knowledge_agent",
         "refusal": "refusal",
-        "error": "error",
+        "error_handler": "error_handler",
     })
-    builder.add_conditional_edges("knowledge", _route, {
+    builder.add_conditional_edges("knowledge_agent", _route, {
         "evaluator_qa": "evaluator_qa",
         "refusal": "refusal",
-        "error": "error",
+        "error_handler": "error_handler",
     })
 
     builder.add_edge("evaluator_qa", END)
     builder.add_edge("refusal", END)
-    builder.add_edge("error", END)
+    builder.add_edge("error_handler", END)
 
     return builder
 
 
 def _route(state: AgentState) -> str:
-    return state.get("next_node", "error")
+    return state.get("next_node", "error_handler")

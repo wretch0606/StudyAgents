@@ -19,8 +19,8 @@ _project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_project_root))
 
 # ---- 测试参数 ----
-WARMUP_ROUNDS = 3
-SAMPLE_ROUNDS = 20
+WARMUP_ROUNDS = 5
+SAMPLE_ROUNDS = 50
 # 硬件/环境
 HARDWARE = "Windows 11, Python 3.12, FakeAdapter (无真实模型调用)"
 

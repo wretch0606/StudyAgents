@@ -60,6 +60,11 @@ def create_app() -> FastAPI:
     app.include_router(wrong_book.router, prefix="/api")
     app.include_router(learning_summary.router, prefix="/api")
 
+    # ---- 初始化 Checkpointer（LangGraph 检查点持久化） ----
+    from apps.api.services.checkpointer import init_checkpointer
+
+    init_checkpointer()
+
     # ---- 初始化 AgentRunnerService（默认使用 FakeAgentRunner） ----
     from apps.api.services.agent_event_sink import agent_event_sink
     from apps.api.services.agent_runner import init_agent_runner

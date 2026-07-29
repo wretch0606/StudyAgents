@@ -182,9 +182,10 @@ class IngestionPipeline:
 
 def _find_sample_pdf() -> Path:
     """查找样例 PDF"""
+    _root = Path(__file__).resolve().parent.parent.parent.parent
     candidates = [
-        Path("src/tests/fixtures/sample_lecture.pdf"),
-        Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "sample_lecture.pdf",
+        Path("tests/fixtures/sample_lecture.pdf"),
+        _root / "tests" / "fixtures" / "sample_lecture.pdf",
     ]
     for p in candidates:
         if p.exists():
