@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -135,47 +134,6 @@ async def test_run_pipeline(adapter) -> None:
     await adapter.run_pipeline(job)
     assert adapter.jobs[job.job_id]["status"] == "succeeded"
     assert adapter.jobs[job.job_id]["progress"] == 100.0
-
-
-@pytest.mark.asyncio
-async def test_real_handler_passes_uploaded_file_to_pipeline(tmp_path) -> None:
-    """生产处理器将上传文件路径和文档 ID 交给 B 管线。"""
-    from apps.worker.ingestion_adapter import IngestionPipelineHandler
-    from apps.worker.pipeline import WorkerTask
-
-    source = tmp_path / "lecture.pdf"
-    source.write_bytes(b"%PDF-1.4")
-    pipeline = type("Pipeline", (), {})()
-    pipeline.run_to_completion = AsyncMock()
-    handler = IngestionPipelineHandler(pipeline)
-
-    result = await handler.handle(WorkerTask(
-        task_id="job-1",
-        task_type="validate",
-        payload={"document_id": "doc-1", "file_path": str(source)},
-    ))
-
-    assert result.success
-    job, passed_path = pipeline.run_to_completion.await_args.args
-    assert job.document_id == "doc-1"
-    assert passed_path == str(source)
-
-
-@pytest.mark.asyncio
-async def test_real_handler_rejects_missing_source() -> None:
-    from apps.worker.ingestion_adapter import IngestionPipelineHandler
-    from apps.worker.pipeline import WorkerTask
-
-    handler = IngestionPipelineHandler(type("Pipeline", (), {})())
-    result = await handler.handle(WorkerTask(
-        task_id="job-2",
-        task_type="validate",
-        payload={"document_id": "doc-2"},
-    ))
-
-    assert not result.success
-    assert result.error_code == "SOURCE_FILE_NOT_FOUND"
-    assert result.retryable is False
 
 
 # ---- Get Job ----

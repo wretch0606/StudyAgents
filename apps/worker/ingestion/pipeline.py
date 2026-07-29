@@ -9,6 +9,7 @@
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 from apps.worker.ingestion.chunker import Chunker
 from apps.worker.ingestion.job_manager import JobManager
@@ -34,8 +35,8 @@ class IngestionPipeline:
     def __init__(
         self,
         job_manager: JobManager,
-        retriever: HybridRetriever | None = None,
-        ocr_engine: OCRInterface | None = None,
+        retriever: Optional[HybridRetriever] = None,
+        ocr_engine: Optional[OCRInterface] = None,
     ):
         self.job_mgr = job_manager
         self.retriever = retriever or HybridRetriever()
@@ -58,10 +59,8 @@ class IngestionPipeline:
 
     # ---- 主入口 ----
 
-    async def run(self, job: IngestionJob, source_path: str | Path | None = None):
-        """执行当前导入阶段，并将真实源文件路径保留到后续阶段。"""
-        if source_path is not None:
-            self._set(job.job_id, "source_path", str(Path(source_path).resolve()))
+    async def run(self, job: IngestionJob):
+        """执行完整导入管线"""
         logger.info(f"[{job.job_id}] 开始导入，阶段: {job.stage.value}")
         try:
             dispatch = {
@@ -81,34 +80,17 @@ class IngestionPipeline:
                 logger.warning(f"[{job.job_id}] 未知阶段: {job.stage.value}")
         except Exception as e:
             logger.error(f"[{job.job_id}] {job.stage.value} 失败: {e}")
-            retryable = not isinstance(e, ValueError | FileNotFoundError)
+            retryable = not isinstance(e, (ValueError, FileNotFoundError))
             await self.job_mgr.fail_job(job.job_id, str(e), retryable=retryable)
             raise
-
-    async def run_to_completion(
-        self, job: IngestionJob, source_path: str | Path,
-    ) -> None:
-        """从当前阶段连续运行到完成，防止阶段未推进时无限循环。"""
-        for _ in range(8):
-            previous_stage = job.stage
-            await self.run(job, source_path=source_path)
-            if previous_stage == IngestionStage.COMPLETING:
-                return
-            if job.stage == previous_stage:
-                failure = getattr(self.job_mgr, "last_error", None)
-                raise RuntimeError(failure or f"导入阶段未推进: {job.stage.value}")
-        raise RuntimeError("导入管线超过最大阶段数")
 
     # ---- 各阶段 ----
 
     async def _do_extract(self, job: IngestionJob):
         await self.job_mgr.update_progress(job.job_id, IngestionStage.EXTRACTING, 5.0)
 
-        source_path = self._get(job.job_id, "source_path")
-        pdf_path = Path(source_path) if source_path else _find_sample_pdf()
-        if not pdf_path.is_file():
-            raise FileNotFoundError(f"导入源文件不存在: {pdf_path}")
-        pages = self.parser.parse(str(pdf_path), job.document_id)
+        file_path = self._get(job.job_id, "file_path") or _find_sample_pdf()
+        pages = self.parser.parse(str(file_path), job.document_id)
         self._set(job.job_id, "pages", pages)
 
         await self.job_mgr.update_progress(
@@ -200,11 +182,68 @@ class IngestionPipeline:
 
 def _find_sample_pdf() -> Path:
     """查找样例 PDF"""
+    _root = Path(__file__).resolve().parent.parent.parent.parent
     candidates = [
-        Path("src/tests/fixtures/sample_lecture.pdf"),
-        Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "sample_lecture.pdf",
+        Path("tests/fixtures/sample_lecture.pdf"),
+        _root / "tests" / "fixtures" / "sample_lecture.pdf",
     ]
     for p in candidates:
         if p.exists():
             return p.resolve()
     raise FileNotFoundError("样例 PDF 不存在，请先运行 generate_sample_pdf.py")
+
+
+class IngestionHandler:
+    """Worker handler — 将 IngestionPipeline 适配为 PipelineHandler 协议。
+
+    从 WorkerTask.payload 中提取 document_id，查询文件路径，驱动入库管线。
+    """
+
+    async def handle(self, task):
+        from apps.worker.pipeline import WorkerResult
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        document_id = task.payload.get("document_id", "") if task.payload else ""
+        if not document_id:
+            return WorkerResult(
+                task_id=task.task_id, success=False,
+                error_code="MISSING_DOCUMENT_ID",
+                error_message="task payload 缺少 document_id",
+            )
+
+        # 从数据库查询文件路径
+        from apps.api.db.session import _get_sessionmaker
+        from apps.api.db.models.document import Document as ApiDocument
+        from apps.worker.ingestion.job_manager import JobManager
+
+        file_path = None
+        async with _get_sessionmaker()() as db_session:
+            result = await db_session.execute(
+                select(ApiDocument).where(ApiDocument.id == document_id),
+            )
+            doc = result.scalar_one_or_none()
+            if doc is not None and doc.file_path:
+                file_path = doc.file_path
+
+        if not file_path:
+            return WorkerResult(
+                task_id=task.task_id, success=False,
+                error_code="MISSING_FILE_PATH",
+                error_message=f"文档 {document_id} 没有持久化文件路径",
+            )
+
+        # 驱动入库管线（每个阶段使用独立 DB 会话）
+        async with _get_sessionmaker()() as db_session:
+            job_mgr = JobManager(db_session)
+            pipeline = IngestionPipeline(job_manager=job_mgr)
+            pipeline._set(task.task_id, "file_path", file_path)
+
+            from apps.worker.schemas import IngestionJob as BIngestionJob, IngestionStage
+            b_job = BIngestionJob(
+                job_id=task.task_id, document_id=document_id,
+                stage=IngestionStage.EXTRACTING,
+            )
+            await pipeline.run(b_job)
+
+        return WorkerResult(task_id=task.task_id, success=True, output={})

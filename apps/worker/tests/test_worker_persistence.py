@@ -27,14 +27,25 @@ pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 async def _dispose_engine():
     """每个测试后清理 DB engine 连接池（Windows ProactorEventLoop 兼容）。"""
     yield
-    import apps.api.db.session as sess_mod
+    from apps.api.db.session import dispose_engine
     try:
-        eng = sess_mod._get_engine()
-        await eng.dispose()
-        sess_mod._engine = None
-        sess_mod._sessionmaker = None
+        await dispose_engine()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+async def _clean_stale_jobs():
+    """每个测试前清理残留的 pending/running jobs，防止跨测试干扰。"""
+    from sqlalchemy import text as _text
+
+    from apps.api.db.session import session_context
+    async with session_context() as db:
+        await db.execute(_text(
+            "DELETE FROM ingestion_jobs WHERE status IN ('pending', 'running')"
+        ))
+        await db.commit()
+    yield
 
 
 async def _cleanup(doc_id: str, job_id: str) -> None:
