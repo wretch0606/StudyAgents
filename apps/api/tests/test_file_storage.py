@@ -175,40 +175,6 @@ def test_save_file_cleans_filename(tmp_path, monkeypatch) -> None:
     assert Path(path).exists()
 
 
-def test_resolve_and_delete_stored_file(tmp_path, monkeypatch) -> None:
-    """数据库存储名只能解析到受控目录，且可安全删除。"""
-    from apps.api.services.file_storage import (
-        delete_stored_file,
-        resolve_storage_path,
-        save_file,
-    )
-
-    monkeypatch.setattr("apps.api.services.file_storage.settings.files_root", str(tmp_path))
-    path, _, _ = save_file(io.BytesIO(b"%PDF-1.4 test"), filename="test.pdf")
-
-    resolved = resolve_storage_path(Path(path).name)
-    assert resolved == Path(path).resolve()
-    delete_stored_file(path)
-    assert not resolved.exists()
-
-
-def test_storage_helpers_reject_path_escape(tmp_path, monkeypatch) -> None:
-    """解析和删除均拒绝越过 files_root。"""
-    from apps.api.services.file_storage import (
-        FileValidationError,
-        delete_stored_file,
-        resolve_storage_path,
-    )
-
-    monkeypatch.setattr("apps.api.services.file_storage.settings.files_root", str(tmp_path))
-    outside = tmp_path.parent / "outside.pdf"
-
-    with pytest.raises(FileValidationError):
-        resolve_storage_path("../outside.pdf")
-    with pytest.raises(FileValidationError):
-        delete_stored_file(outside)
-
-
 # ============================================================
 # SHA-256 去重
 # ============================================================

@@ -118,7 +118,7 @@ async def get_learning_summary(
     )
 
     return LearningSummary(
-        user_id=user_id,
+        user_id=str(user_id),
         mastery_records=mastery_records,
         pending_wrong_count=pending_count,
         reviewing_wrong_count=reviewing_count,

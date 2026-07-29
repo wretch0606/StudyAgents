@@ -10,7 +10,7 @@ AgentState — LangGraph 状态图中流转的状态对象。
 """
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 # ── 检索过滤条件 ────────────────────────────────────
 
@@ -96,4 +96,8 @@ class AgentState(TypedDict, total=False):
 
     # ── strict ──
     user_answer: str | None      # 用户提交的答案原文
-    # question_private / grade_private 由 Day 4 补充
+
+    # ── 训练模式专用（Day 4）──
+    practice_items: list[dict]       # 本轮训练题目快照列表
+    current_item_index: int         # 当前题目序号（0-based）
+    practice_summary: Optional[dict]  # 训练总结（得分/掌握度变化/错题）

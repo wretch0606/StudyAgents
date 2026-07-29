@@ -19,14 +19,6 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    import asyncio
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 # ============================================================
 # 1. 首次提交
 # ============================================================
@@ -400,15 +392,18 @@ async def test_mid_range_scores_no_difficulty_change() -> None:
     from apps.api.services.grading_adapter import FakeGradingAdapter
     from apps.api.services.grading_service import GradingService
 
+    grade_ids: list[str] = []
+
     # Submit with partial score (0.5 of max)
     async with _get_sessionmaker()() as s:
         adapter = FakeGradingAdapter(scenario="partial")
         svc = GradingService(s, adapter=adapter)
-        await svc.submit_answer(
+        result = await svc.submit_answer(
             session_id=sid, item_id=item_id, user_id=uid,
             answer_text="half", question_version="1.0",
             idempotency_key=f"mid1-{_uuid.uuid4().hex[:8]}",
         )
+        grade_ids.append(result.grade_id)
 
     # Second partial score
     from apps.api.services.training_service import TrainingService
@@ -422,19 +417,20 @@ async def test_mid_range_scores_no_difficulty_change() -> None:
     async with _get_sessionmaker()() as s:
         adapter = FakeGradingAdapter(scenario="partial")
         svc = GradingService(s, adapter=adapter)
-        await svc.submit_answer(
+        result = await svc.submit_answer(
             session_id=sid, item_id=item2, user_id=uid,
             answer_text="half", question_version="1.0",
             idempotency_key=f"mid2-{_uuid.uuid4().hex[:8]}",
         )
-        # No difficulty change should be logged for mid-range
+        grade_ids.append(result.grade_id)
+        # Only consider change logs from this test's own grade submissions
         from sqlalchemy import select as sa_select
 
         from apps.api.db.models.mastery_change_log import MasteryChangeLog
         logs = (await s.execute(
-            sa_select(MasteryChangeLog).order_by(
-                MasteryChangeLog.created_at.desc(),
-            ).limit(5),
+            sa_select(MasteryChangeLog)
+            .where(MasteryChangeLog.source_grade_id.in_(grade_ids))
+            .order_by(MasteryChangeLog.created_at.desc()),
         )).scalars().all()
         diff_logs = [
             entry.change_reason for entry in logs
