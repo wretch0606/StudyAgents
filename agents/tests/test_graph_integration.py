@@ -203,12 +203,11 @@ class PracticeGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ref0 = real_result.source_refs[0]
         self.assertTrue(hasattr(ref0, "document_name"), "SourceRef 应为数据类对象")
 
-        # 验证 graph 可编译（不报 NameError/参数错误）
+        # 验证 graph 可编译
         from agents.graph_practice import build_practice_graph
         graph = build_practice_graph().compile()
         self.assertIsNotNone(graph)
 
-        # 直接调用节点，验证核心逻辑
         state: AgentState = {
             "run_id": "run-1", "trace_id": "trace-1", "thread_id": "thread-1",
             "user_id": "u1", "mode": "practice", "user_input": "训练",
@@ -220,23 +219,114 @@ class PracticeGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         }
         cfg = {"configurable": {"model": FakeModelGateway(), "retriever": retriever}}
 
-        # coordinator → questioner
         r1 = await coordinator_practice_node(state, cfg)
         self.assertEqual(r1["next_node"], "questioner")
-        # 合并状态
         state.update(r1)
         r2 = await questioner_node(state, cfg)
 
-        # 验证产出
         self.assertIn("current_public_question", r2)
         pub_q = r2["current_public_question"]
         self.assertEqual(pub_q["question_type"], "choice")
         self.assertNotIn("expected_answer", str(pub_q))
-        # 私有数据存在内部
         items = r2.get("practice_items", [])
         self.assertEqual(len(items), 1)
         self.assertIn("private", items[0])
         self.assertEqual(items[0]["private"]["expected_answer"], "A")
+
+
+    async def test_full_graph_two_questions_correct_choice(self) -> None:
+        """Day 4 集成：完整状态图执行连续两题，正确选择取得非零满分"""
+        from agents.graph_practice import build_practice_graph
+        from agents.state import AgentState
+        from agents.tests.fake_adapters import FakeModelGateway, FakeRetriever
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.types import Command
+
+        graph = build_practice_graph().compile(checkpointer=MemorySaver())
+
+        initial_state: AgentState = {
+            "run_id": "run-full-1",
+            "trace_id": "trace-full-1",
+            "thread_id": "thread-full-1",
+            "user_id": "user-1",
+            "mode": "practice",
+            "user_input": "开始训练",
+            "filters": {
+                "chapter_ids": ["ch-01"],
+                "difficulty": 2,
+                "question_types": ["choice"],
+                "target_count": 2,
+            },
+            "model_calls": 0,
+            "node_hops": 0,
+            "retry_count": 0,
+            "current_item_index": 0,
+            "practice_items": [],
+            "exclude_chunk_ids": [],
+            "practice_scores": [],
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": "thread-full-1",
+                "model": FakeModelGateway(),
+                "retriever": FakeRetriever(),
+                "event_sink": None,
+            }
+        }
+
+        # ── 第 1 题：coordinator → questioner → wait_for_answer（中断）──
+        result = await graph.ainvoke(initial_state, config)
+
+        # 验证第 1 题的公开题目
+        pub_q1 = result.get("current_public_question", {})
+        self.assertEqual(pub_q1.get("question_type"), "choice",
+                        f"第1题应为选择题，实际: {pub_q1}")
+        self.assertEqual(pub_q1.get("order_no"), 1,
+                        f"第1题 order_no 应为 1，实际: {pub_q1.get('order_no')}")
+        # 防泄露
+        self.assertNotIn("expected_answer", str(pub_q1))
+        self.assertNotIn("rubric", str(pub_q1))
+
+        # ── 提交第 1 题答案 A（正确）→ evaluator → questioner（出第 2 题）──
+        result2 = await graph.ainvoke(Command(resume="A"), config)
+
+        # 验证第 1 题评分
+        items = result2.get("practice_items", [])
+        self.assertEqual(len(items), 2, f"应有 2 题记录，实际: {len(items)}")
+        grade1 = items[0].get("grade", {})
+        self.assertTrue(grade1.get("met", False),
+                       f"第 1 题正确作答 met 应为 True，实际: {grade1}")
+        # 关键断言：正确选择取得非零满分
+        self.assertGreater(grade1.get("score", 0), 0,
+                          f"第 1 题正确选择得分应 > 0，实际: {grade1.get('score')}")
+        self.assertGreater(grade1.get("max_score", 0), 0,
+                          f"第 1 题满分应 > 0，实际: {grade1.get('max_score')}")
+
+        # 验证题号连续不跳跃
+        pub_q2 = result2.get("current_public_question", {})
+        self.assertEqual(pub_q2.get("order_no"), 2,
+                        f"第 2 题 order_no 应为 2，实际: {pub_q2.get('order_no')}")
+
+        # ── 提交第 2 题答案 B（错误）→ evaluator → summary（target_count=2 结束）──
+        result3 = await graph.ainvoke(Command(resume="B"), config)
+
+        # 验证训练总结
+        summary = result3.get("practice_summary", {})
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.get("items_count"), 2,
+                        f"总题数应为 2，实际: {summary.get('items_count')}")
+
+        # 验证第 2 题评分
+        grade2 = items[1].get("grade", {})
+        self.assertIsNotNone(grade2)
+        self.assertFalse(grade2.get("met", False),
+                        f"第 2 题错误作答 met 应为 False")
+
+        # 验证公开响应无泄露
+        pub_resp = result3.get("public_response", "")
+        self.assertNotIn("expected_answer", pub_resp)
+        self.assertNotIn("A", pub_resp.split("**训练完成**")[0] if "**训练完成**" in pub_resp else pub_resp)
 
     async def test_choice_grading_max_score_zero(self) -> None:
         """选择题 max_score=0 时正确作答 met=True（Day 4 修复验证）"""

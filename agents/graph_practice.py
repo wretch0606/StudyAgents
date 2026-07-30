@@ -21,11 +21,12 @@ Day 6 修复（V1.1）：
   - HybridRetriever:  通过 config["configurable"]["retriever"]
   - LangGraph interrupt:  D 的 PostgreSQL checkpointer
 """
-from __future__ import annotations
+# 注意：不使用 from __future__ import annotations，
+# LangGraph 需要运行时解析 config 参数的类型标注来识别 RunnableConfig。
 
 import uuid
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Optional
 
 try:
     from langchain_core.runnables import RunnableConfig
@@ -95,7 +96,7 @@ from .graph import error_node as _qa_error_node
 
 async def coordinator_practice_node(
     state: AgentState,
-    config: RunnableConfig | None = None,
+    config: Optional[RunnableConfig] = None,
 ) -> dict[str, Any]:
     """
     协调节点（训练模式）：解析用户选择的章节/题型/难度/题数。
@@ -133,7 +134,7 @@ async def coordinator_practice_node(
 
 async def questioner_node(
     state: AgentState,
-    config: RunnableConfig | None = None,
+    config: Optional[RunnableConfig] = None,
 ) -> dict[str, Any]:
     """
     出题节点：真题优先 → 变式生成。
@@ -196,7 +197,9 @@ async def questioner_node(
 
     # Step 4: 构造公开题目和私有数据
     item_id = question.question_id or str(uuid.uuid4())
-    order_no = state.get("current_item_index", 0) + 1
+    # current_item_index 保持 0-based，order_no 用于展示（1-based）
+    idx = state.get("current_item_index", 0)
+    order_no = idx + 1
 
     public_item = {
         "item_id": item_id,
@@ -233,7 +236,7 @@ async def questioner_node(
 
     return {
         "practice_items": practice_items,
-        "current_item_index": order_no,
+        "practice_items_count": len(practice_items),
         "current_public_question": public_item,
         "next_node": "wait_for_answer",
     }
@@ -258,7 +261,7 @@ async def wait_for_answer_node(state: AgentState) -> dict[str, Any]:
 
 async def evaluator_practice_node(
     state: AgentState,
-    config: RunnableConfig | None = None,
+    config: Optional[RunnableConfig] = None,
 ) -> dict[str, Any]:
     """
     评测节点（训练模式）：客观题规则评分 / 主观题 LLM 评分。
@@ -269,7 +272,7 @@ async def evaluator_practice_node(
         return _error_return(state, "AGENT_LIMIT_EXCEEDED", "超过调用或节点上限", False)
 
     practice_items = state.get("practice_items", [])
-    idx = state.get("current_item_index", 1) - 1  # 转为 0-based
+    idx = state.get("current_item_index", 0)  # 0-based，questioner 不再覆写
     if idx < 0 or idx >= len(practice_items):
         return _error_return(state, "PRACTICE_STATE_CONFLICT", "题目索引越界", True)
 
@@ -279,20 +282,17 @@ async def evaluator_practice_node(
     question_type = current["question_type"]
 
     # ── 客观题：规则评分，不调 LLM ──
-    if question_type == "choice":
-        grade = grade_choice(user_answer, private["expected_answer"], 0)
-        feedback = _build_feedback(
-            grade["score"], 0,
-            [{"status": "met" if grade["met"] else "not_met", "text": grade["feedback"]}],
-            "", grade["confidence"], False,
-        )
-        return _finish_item(state, current, feedback, grade)
-
-    if question_type == "fill_blank":
+    if question_type in ("choice", "fill_blank"):
         rubric = private.get("rubric", [])
-        max_score = sum(r["max_score"] for r in rubric) if rubric else 0
-        acceptable = rubric[0].get("acceptable_forms", []) if rubric else None
-        grade = grade_fill_blank(user_answer, private["expected_answer"], acceptable, max_score)
+        # 从评分规则中计算满分（至少 1 分，确保非零）
+        max_score = sum(r["max_score"] for r in rubric) if rubric else 1
+
+        if question_type == "choice":
+            grade = grade_choice(user_answer, private["expected_answer"], max_score)
+        else:
+            acceptable = rubric[0].get("acceptable_forms", []) if rubric else None
+            grade = grade_fill_blank(user_answer, private["expected_answer"], acceptable, max_score)
+
         feedback = _build_feedback(
             grade["score"], max_score,
             [{"status": "met" if grade["met"] else "not_met", "text": grade["feedback"]}],
@@ -380,17 +380,18 @@ async def evaluator_practice_node(
 def _finish_item(state: AgentState, current: dict, feedback: dict, grade: dict) -> dict:
     """记录本题评分，决定下一题还是结束"""
     practice_items = state.get("practice_items", [])
-    idx = state.get("current_item_index", 1) - 1
-    practice_items[idx]["feedback"] = feedback
-    practice_items[idx]["grade"] = grade
+    idx = state.get("current_item_index", 0)  # 0-based
+    if idx < len(practice_items):
+        practice_items[idx]["feedback"] = feedback
+        practice_items[idx]["grade"] = grade
 
-    current_idx = state.get("current_item_index", 1)
+    current_idx = idx  # 0-based
     target = state.get("target_count", 5)
     scores = state.get("practice_scores", [])
     grade_ratio = grade.get("score_ratio", grade.get("score", 0) / max(grade.get("max_score", 1), 1))
     scores = list(scores) + [grade_ratio]
 
-    if current_idx >= target:
+    if current_idx + 1 >= target:
         # 最后一题 → 生成总结
         total_score = sum(
             it.get("grade", {}).get("score", 0)
@@ -414,7 +415,7 @@ def _finish_item(state: AgentState, current: dict, feedback: dict, grade: dict) 
             "next_node": "summary",
         }
     else:
-        # 继续下一题
+        # 继续下一题（current_item_index + 1 = 下一个 0-based 索引）
         exclude_ids = list(state.get("exclude_chunk_ids", []))
         for c in current.get("source_refs", []):
             cid = c.get("chunk_id", "") if isinstance(c, dict) else getattr(c, "chunk_id", "")
@@ -431,7 +432,7 @@ def _finish_item(state: AgentState, current: dict, feedback: dict, grade: dict) 
 
 async def summary_node(
     state: AgentState,
-    config: RunnableConfig | None = None,
+    config: Optional[RunnableConfig] = None,
 ) -> dict[str, Any]:
     """训练结束：输出总结"""
     s = state.get("practice_summary", {})
@@ -496,6 +497,7 @@ def build_practice_graph():
 
     builder.add_edge("coordinator", "questioner")
     builder.add_edge("questioner", "wait_for_answer")
+    builder.add_edge("wait_for_answer", "evaluator")
     builder.add_conditional_edges("evaluator", _route_practice, {
         "questioner": "questioner",
         "summary": "summary",
