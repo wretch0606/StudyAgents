@@ -371,7 +371,7 @@ def test_error_object_contains_required_fields():
     _ok("错误对象 → code/message/retryable/trace_id 完整")
 
 
-def test_error_node_includes_trace_id():
+async def test_error_node_includes_trace_id():
     """error_node 返回的错误包含 trace_id"""
     state = _base_state(
         error={
@@ -381,9 +381,7 @@ def test_error_node_includes_trace_id():
             "trace_id": "trace-test-001",
         }
     )
-    # 同步调用 error_node（它是 async 但内部逻辑简单）
-    import asyncio
-    result = asyncio.get_event_loop().run_until_complete(error_node(state, None))
+    result = await error_node(state, None)
 
     assert result.get("public_response") is not None
     assert "error" not in result  # error_node 清除 error，返回公开响应
@@ -460,19 +458,15 @@ def test_all_refusal_reasons_have_template():
     _ok("7 种拒答原因 → 模板完整")
 
 
-def test_refusal_node_output_no_private():
+async def test_refusal_node_output_no_private():
     """拒答节点输出不应包含私有字段"""
-    import asyncio
-
     state = _base_state(
         reason="no_results",
         filters={"chapter_ids": ["ch-01"]},
     )
     sink = FakeEventSink()
 
-    result = asyncio.get_event_loop().run_until_complete(
-        refusal_node(state, _config(event_sink=sink))
-    )
+    result = await refusal_node(state, _config(event_sink=sink))
 
     public_response = result.get("public_response", "")
     forbidden = ["expected_answer", "rubric", "private_evidence"]
@@ -575,6 +569,8 @@ def run_all():
         ("有效引用 → 正常通过", test_valid_citation_passes),
         ("节点超限 → AGENT_LIMIT_EXCEEDED", test_limits_exceeded_in_node),
         ("低置信度 → 降级回退", test_low_confidence_fallback),
+        ("error_node 消费错误", test_error_node_includes_trace_id),
+        ("拒答输出不含私有字段", test_refusal_node_output_no_private),
         ("FakeModelGateway 通话记录", test_model_gateway_call_logging),
         ("故障在第 N 次调用触发", test_fault_injection_on_specific_call),
     ]
@@ -585,9 +581,7 @@ def run_all():
         ("MAX_NODE_HOPS 限制", test_max_node_hops_limit),
         ("在限制内不触发", test_within_limits),
         ("错误对象包含 code/retryable/trace_id", test_error_object_contains_required_fields),
-        ("error_node 消费错误并返回公开响应", test_error_node_includes_trace_id),
         ("7 种拒答原因模板完整", test_all_refusal_reasons_have_template),
-        ("拒答输出不含私有字段", test_refusal_node_output_no_private),
     ]
 
     # 运行同步测试
@@ -599,8 +593,7 @@ def run_all():
             _fail(name, str(e))
 
     # 运行异步测试
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(_run_async_tests(async_tests))
+    asyncio.run(_run_async_tests(async_tests))
 
     total = PASSED + FAILED
     pct = 100 * PASSED // total if total > 0 else 0
