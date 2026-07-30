@@ -31,10 +31,21 @@ export default defineConfig({
     },
   ],
 
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5173',
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  },
+  webServer: [
+    {
+      // 启动后端服务（postgres + api + worker）
+      // compose.yml 位于 monorepo 根目录
+      command: 'docker compose up -d postgres api worker',
+      url: 'http://localhost:8080/api/health/live',
+      reuseExistingServer: !process.env.CI,
+      timeout: 90_000,
+      cwd: '../..',
+    },
+    {
+      command: 'npm run dev',
+      url: 'http://localhost:5173',
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+  ],
 })

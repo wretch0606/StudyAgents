@@ -35,8 +35,8 @@ export interface ChatMessage {
 export interface ChatAttachment {
   /** 附件临时 ID（本地生成，用于删除操作） */
   localId: string
-  /** 服务端返回的文件 URL */
-  fileUrl: string
+  /** 后端返回的 document_id（上传成功后填充） */
+  documentId: string
   /** 原始文件名 */
   fileName: string
   /** 文件大小（字节） */
@@ -420,23 +420,11 @@ export const useChatStore = defineStore('chat', () => {
    *                     run.completed / run.failed → 收尾
    *
    * @param userInput 用户输入文本
+   * @param fileIds 已上传附件的 document_id 列表（通过独立字段发送，不嵌入 user_input）
    */
-  async function startQa(userInput: string, attachments?: ChatAttachment[]): Promise<void> {
+  async function startQa(userInput: string, fileIds?: string[]): Promise<void> {
     // 断开上一轮 SSE（如果有）
     disconnectSSE()
-
-    // 拼接附件信息到 user_input（后端 QA 端点不接收独立的 attachments 字段）
-    // 包含完整 Data URL，确保后端可读取文件内容
-    let fullInput = userInput
-    if (attachments && attachments.length > 0) {
-      const doneAtts = attachments.filter((a) => a.uploadStatus === 'done')
-      if (doneAtts.length > 0) {
-        const attInfo = doneAtts
-          .map((a) => `[附件: ${a.fileName} (${a.fileSize} bytes)]\n[文件内容: ${a.fileUrl}]`)
-          .join('\n')
-        fullInput = `${attInfo}\n\n${userInput}`
-      }
-    }
 
     // 初始化 Agent 轨迹
     clearAgentTraces()
@@ -491,11 +479,18 @@ export const useChatStore = defineStore('chat', () => {
         currentSessionId.value = session.id
       }
 
-      // 2. 发起 QA
+      // 2. 发起 QA（附件通过 file_ids 字段独立传递，不嵌入 user_input）
+      const qaBody: Record<string, unknown> = {
+        user_input: userInput,
+        mode: 'qa',
+      }
+      if (fileIds && fileIds.length > 0) {
+        qaBody.file_ids = fileIds
+      }
       const qaResp = await fetch(`/api/sessions/${currentSessionId.value}/qa`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-        body: JSON.stringify({ user_input: fullInput, mode: 'qa' }),
+        body: JSON.stringify(qaBody),
       })
       if (!qaResp.ok) {
         throw new Error(`QA 启动失败: HTTP ${qaResp.status}`)
@@ -536,10 +531,25 @@ export const useChatStore = defineStore('chat', () => {
           // 终止事件
           if (evt.event_type === 'run.completed' || evt.event_type === 'run.failed') {
             archiveAgentSteps()
-            finishStream()
             eventSource.close()
             activeEventSource = null
-            resolve()
+
+            // 后端在 run 完成后才将 assistant 消息持久化到数据库，
+            // 因此 SSE 事件流中可能不包含最终回答正文 — 从 REST API 拉取补齐。
+            // 若流式占位消息为空（未收到任何非 JSON 文本），先移除避免重复。
+            const sid = streamingMessageId.value
+            if (sid) {
+              const streamMsg = messages.value.find((m) => m.id === sid)
+              if (streamMsg && streamMsg.content.trim().length === 0) {
+                messages.value = messages.value.filter((m) => m.id !== sid)
+                streamingMessageId.value = null
+              }
+            }
+
+            pullLatestMessages().finally(() => {
+              finishStream()
+              resolve()
+            })
           }
         } catch {
           // 非 JSON 消息 → 这才是真正的回答正文流式块（SSE data-only 纯文本行）

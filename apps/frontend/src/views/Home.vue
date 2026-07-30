@@ -255,8 +255,10 @@ async function submitAnswer() {
     evaluationReport.value = report
     isSubmitted.value = true
 
-    // ---- 错题沉淀：得分 < 80 自动收录 ----
-    if (report.score < 80) {
+    // ---- 错题沉淀：得分率 < 80% 自动收录 ----
+    // 使用百分比而非绝对分值，避免满分较小的题目（如满分10分）误判
+    const scoreRate = report.total > 0 ? report.score / report.total : 0
+    if (scoreRate < 0.8) {
       wrongBookStore.addEntry({
         chapter: selectedChapter.value,
         chapterLabel: chapterLabel.value,
@@ -468,8 +470,11 @@ async function handleSend() {
   // 3. 清空输入框（附件在请求发送成功后再清除）
   inputText.value = ''
 
-  // 4. 调用真实后端 SSE 流式问答（含附件信息）
-  await chatStore.startQa(text, currentAttachments)
+  // 4. 调用真实后端 SSE 流式问答（附件通过 file_ids 字段独立传递）
+  const fileIds = currentAttachments
+    ?.filter((a) => a.uploadStatus === 'done' && a.documentId)
+    .map((a) => a.documentId)
+  await chatStore.startQa(text, fileIds)
 
   // 5. 请求发送成功后，清空已发送的附件
   chatStore.clearAttachments()
@@ -503,7 +508,7 @@ function triggerChatUpload() {
   chatFileInputRef.value?.click()
 }
 
-/** 文件选择后 → 上传 → 暂存到 Store */
+/** 文件选择后 → 上传到后端 → 暂存 document_id 到 Store */
 async function handleChatFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -514,7 +519,7 @@ async function handleChatFileChange(e: Event) {
   // 先添加到 Store（uploading 状态，显示加载卡片）
   chatStore.addAttachment({
     localId,
-    fileUrl: '',
+    documentId: '',
     fileName: file.name,
     fileSize: file.size,
     uploadStatus: 'uploading',
@@ -523,9 +528,9 @@ async function handleChatFileChange(e: Event) {
   chatUploading.value = true
   try {
     const res = await uploadChatAttachment(file)
-    // 上传成功 → 更新状态
+    // 上传成功 → 更新状态（保存后端返回的 document_id）
     chatStore.updateAttachment(localId, {
-      fileUrl: res.file_url,
+      documentId: res.document_id,
       fileName: res.file_name,
       uploadStatus: 'done',
     })
