@@ -15,7 +15,6 @@ import { useWrongBookStore } from '../stores/useWrongBookStore'
 import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
 import { ElMessage } from 'element-plus'
-import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
 import { renderMixedHtml } from '../utils/katex-renderer'
@@ -470,11 +469,15 @@ async function handleSend() {
   // 3. 清空输入框（附件在请求发送成功后再清除）
   inputText.value = ''
 
-  // 4. 调用真实后端 SSE 流式问答（附件通过 file_ids 字段独立传递）
-  const fileIds = currentAttachments
-    ?.filter((a) => a.uploadStatus === 'done' && a.documentId)
-    .map((a) => a.documentId)
-  await chatStore.startQa(text, fileIds)
+  // 4. 构造发送文本（附件文件名嵌入 user_input 作为文本引用）
+  //    后端 POST /api/documents 仅限 admin，StartQaRequest 无 file_ids 字段，
+  //    因此附件以 [附件: name.pdf] 文本形式传递，避免 403 和字段被忽略。
+  let fullInput = text
+  if (currentAttachments && currentAttachments.length > 0) {
+    const fileNames = currentAttachments.map((a) => a.fileName).join('、')
+    fullInput = `[附件: ${fileNames}]\n\n${text}`
+  }
+  await chatStore.startQa(fullInput)
 
   // 5. 请求发送成功后，清空已发送的附件
   chatStore.clearAttachments()
@@ -491,24 +494,26 @@ function scrollToBottom() {
 }
 
 // =========================================================
-// 问答附件上传（📎 回形针按钮）
+// 问答附件引用（📎 回形针按钮）
+//
+// 注意：后端 POST /api/documents 仅限 admin，普通成员无法上传文件。
+// 附件以文件名引用形式暂存，发送时作为文本嵌入 user_input
+//（如 "[附件: report.pdf]\n\n问题"），避免 403 和字段被忽略。
 // =========================================================
 const chatFileInputRef = ref<HTMLInputElement | null>(null)
-const chatUploading = ref(false)
-
-/** 格式化文件大小为可读字符串 */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 /** 点击回形针 → 触发隐藏的 file input */
 function triggerChatUpload() {
   chatFileInputRef.value?.click()
 }
 
-/** 文件选择后 → 上传到后端 → 暂存 document_id 到 Store */
+/**
+ * 文件选择后 → 暂存文件元数据到 Store，不调用上传 API。
+ *
+ * 注意：后端 POST /api/documents 仅限 admin，普通成员上传会返回 403。
+ * 附件改为在 handleSend 中将文件名作为文本引用嵌入 user_input
+ *（如 "[附件: report.pdf]\n\n问题"），文件名远小于 10000 字符限制。
+ */
 async function handleChatFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -516,33 +521,15 @@ async function handleChatFileChange(e: Event) {
 
   const localId = `att-${Date.now()}`
 
-  // 先添加到 Store（uploading 状态，显示加载卡片）
+  // 仅暂存文件元数据，不发起网络请求
   chatStore.addAttachment({
     localId,
-    documentId: '',
     fileName: file.name,
     fileSize: file.size,
-    uploadStatus: 'uploading',
   })
 
-  chatUploading.value = true
-  try {
-    const res = await uploadChatAttachment(file)
-    // 上传成功 → 更新状态（保存后端返回的 document_id）
-    chatStore.updateAttachment(localId, {
-      documentId: res.document_id,
-      fileName: res.file_name,
-      uploadStatus: 'done',
-    })
-  } catch {
-    // 上传失败 → 更新附件状态 + 明确提示用户
-    chatStore.updateAttachment(localId, { uploadStatus: 'failed' })
-    ElMessage.error(`文件 "${file.name}" 上传失败，请检查网络后重试`)
-  } finally {
-    chatUploading.value = false
-    // 重置 input 以便重复选择同一文件
-    input.value = ''
-  }
+  // 重置 input 以便重复选择同一文件
+  input.value = ''
 }
 
 /** 从待发送列表中移除附件 */
@@ -1176,31 +1163,23 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           @change="handleChatFileChange"
         />
 
-        <!-- 附件卡片区（上传中 / 已上传） -->
+        <!-- 附件卡片区（文件名引用，发送时嵌入 user_input 文本） -->
         <div v-if="attachments.length > 0" class="attachment-cards">
           <div
             v-for="att in attachments"
             :key="att.localId"
-            :class="['attachment-mini-card', att.uploadStatus]"
+            class="attachment-mini-card"
           >
-            <!-- 上传中：旋转 spinner -->
-            <span v-if="att.uploadStatus === 'uploading'" class="att-spinner"></span>
-            <!-- 已上传：文件图标 -->
-            <svg v-else-if="att.uploadStatus === 'done'" class="att-file-icon" viewBox="0 0 20 20" fill="currentColor">
+            <!-- 文件图标 -->
+            <svg class="att-file-icon" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" />
-            </svg>
-            <!-- 失败：警告图标 -->
-            <svg v-else class="att-file-icon att-error" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
             </svg>
 
             <span class="att-filename">{{ att.fileName }}</span>
-            <span v-if="att.uploadStatus === 'uploading'" class="att-size">{{ formatFileSize(att.fileSize) }}</span>
 
             <!-- 删除按钮 -->
             <button
               class="att-remove"
-              :disabled="att.uploadStatus === 'uploading'"
               @click="removeChatAttachment(att.localId)"
               title="移除附件"
             >
@@ -1226,7 +1205,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           </button>
 
           <!-- 📎 附件上传按钮 -->
-          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming || chatUploading" title="上传附件">
+          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming" title="添加附件引用">
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
             </svg>

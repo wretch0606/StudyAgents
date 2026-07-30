@@ -31,18 +31,18 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
 }
 
-/** 问答附件（聊天输入框上传，暂存后随用户提问发送） */
+/** 问答附件（聊天输入框暂存，文件名随 user_input 文本引用发送）
+ *
+ *  注意：后端 POST /api/documents 仅限 admin，
+ *  普通成员附件以 [附件: name.pdf] 文本形式嵌入 user_input，
+ *  避免触发 403 和后端 StartQaRequest 无 file_ids 字段的问题。 */
 export interface ChatAttachment {
   /** 附件临时 ID（本地生成，用于删除操作） */
   localId: string
-  /** 后端返回的 document_id（上传成功后填充） */
-  documentId: string
   /** 原始文件名 */
   fileName: string
   /** 文件大小（字节） */
   fileSize: number
-  /** 上传状态 */
-  uploadStatus: 'uploading' | 'done' | 'failed'
 }
 
 /** Agent 工作流步骤 */
@@ -419,10 +419,9 @@ export const useChatStore = defineStore('chat', () => {
    *                     source_refs → sourceRefs
    *                     run.completed / run.failed → 收尾
    *
-   * @param userInput 用户输入文本
-   * @param fileIds 已上传附件的 document_id 列表（通过独立字段发送，不嵌入 user_input）
+   * @param userInput 用户输入文本（附件文件名已嵌入文本中，如 "[附件: a.pdf]\n\n问题"）
    */
-  async function startQa(userInput: string, fileIds?: string[]): Promise<void> {
+  async function startQa(userInput: string): Promise<void> {
     // 断开上一轮 SSE（如果有）
     disconnectSSE()
 
@@ -479,13 +478,10 @@ export const useChatStore = defineStore('chat', () => {
         currentSessionId.value = session.id
       }
 
-      // 2. 发起 QA（附件通过 file_ids 字段独立传递，不嵌入 user_input）
+      // 2. 发起 QA（后端 StartQaRequest 仅接受 user_input + mode）
       const qaBody: Record<string, unknown> = {
         user_input: userInput,
         mode: 'qa',
-      }
-      if (fileIds && fileIds.length > 0) {
-        qaBody.file_ids = fileIds
       }
       const qaResp = await fetch(`/api/sessions/${currentSessionId.value}/qa`, {
         method: 'POST',
@@ -535,7 +531,7 @@ export const useChatStore = defineStore('chat', () => {
             activeEventSource = null
 
             // 后端在 run 完成后才将 assistant 消息持久化到数据库，
-            // 因此 SSE 事件流中可能不包含最终回答正文 — 从 REST API 拉取补齐。
+            // 因此 SSE 事件流中可能不包含最终回答正文。
             // 若流式占位消息为空（未收到任何非 JSON 文本），先移除避免重复。
             const sid = streamingMessageId.value
             if (sid) {
@@ -546,7 +542,9 @@ export const useChatStore = defineStore('chat', () => {
               }
             }
 
-            pullLatestMessages().finally(() => {
+            // 竞态条件缓解：Agent 图先发布 run.completed 后端才保存消息，
+            // 因此用轮询重试代替单次查询，直到 assistant 消息落库再停止。
+            pollForAssistantMessage().finally(() => {
               finishStream()
               resolve()
             })
@@ -561,10 +559,10 @@ export const useChatStore = defineStore('chat', () => {
 
       eventSource.onerror = () => {
         // SSE 连接异常 — 可能是 run 已完成但事件丢失
-        // 回退：从 /api/sessions/{id}/messages 拉取最新消息
+        // 回退：带重试轮询拉取最新消息
         eventSource.close()
         activeEventSource = null
-        pullLatestMessages().finally(() => {
+        pollForAssistantMessage().finally(() => {
           finishStream()
           resolve()
         })
@@ -613,35 +611,81 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 回退方案：SSE 异常时从 REST API 拉取最新消息。
+   * SSE 终止后轮询拉取 assistant 消息，缓解竞态条件。
+   *
+   * 问题：Agent 图先发布 run.completed 事件，后端才将 assistant 消息
+   * 写入数据库。若前端立即查询，可能拿到空结果或缺少最终回答。
+   *
+   * 方案：每隔 POLL_INTERVAL_MS 拉取一次消息列表，直到出现新的
+   * assistant 消息且内容非空，或达到最大重试次数后强制退出。
    */
-  async function pullLatestMessages(): Promise<void> {
-    if (!currentSessionId.value) return
-    try {
-      const resp = await fetch(`/api/sessions/${currentSessionId.value}/messages`)
-      if (!resp.ok) return
-      const data: { items: MessageItem[] } = await resp.json()
+  const POLL_INTERVAL_MS = 300
+  const POLL_MAX_RETRIES = 30 // ~9 秒
 
-      // 替换或追加消息（以 sequence_no 去重）
-      const existingIds = new Set(messages.value.map((m) => m.id))
-      for (const m of data.items) {
-        if (!existingIds.has(m.id)) {
-          messages.value.push({
-            id: m.id,
-            role: m.role as ChatMessage['role'],
-            content: m.content,
-            timestamp: m.created_at
-              ? new Date(m.created_at).toLocaleTimeString('zh-CN', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })
-              : '',
-          })
+  async function pollForAssistantMessage(): Promise<void> {
+    if (!currentSessionId.value) return
+
+    // 记录轮询开始前已有的 assistant 消息数量，用于判断是否有新消息入库
+    const prevAssistantCount = messages.value.filter(
+      (m) => m.role === 'assistant' && m.content.trim().length > 0,
+    ).length
+
+    for (let attempt = 0; attempt < POLL_MAX_RETRIES; attempt++) {
+      try {
+        const resp = await fetch(`/api/sessions/${currentSessionId.value}/messages`)
+        if (!resp.ok) {
+          // 非 2xx 继续重试（可能后端正在处理）
+          await sleep(POLL_INTERVAL_MS)
+          continue
         }
+        const data: { items: MessageItem[] } = await resp.json()
+
+        // 合并消息（以 id 去重，保留已有消息不覆盖）
+        const existingIds = new Set(messages.value.map((m) => m.id))
+        for (const m of data.items) {
+          if (!existingIds.has(m.id)) {
+            messages.value.push({
+              id: m.id,
+              role: m.role as ChatMessage['role'],
+              content: m.content,
+              timestamp: m.created_at
+                ? new Date(m.created_at).toLocaleTimeString('zh-CN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : '',
+            })
+          }
+        }
+
+        // 判断是否出现了新的非空 assistant 消息
+        const currentAssistantCount = messages.value.filter(
+          (m) => m.role === 'assistant' && m.content.trim().length > 0,
+        ).length
+        if (currentAssistantCount > prevAssistantCount) {
+          // 新消息已入库，停止轮询
+          return
+        }
+      } catch (err) {
+        console.error(
+          `[useChatStore] pollForAssistantMessage 第 ${attempt + 1} 次失败:`,
+          err,
+        )
       }
-    } catch (err) {
-      console.error('[useChatStore] pullLatestMessages 失败:', err)
+
+      // 未找到新消息，等待后重试
+      await sleep(POLL_INTERVAL_MS)
     }
+
+    // 超时兜底：最后一次全量拉取（此时 pullLatestMessages 等价语义）
+    console.warn(
+      '[useChatStore] pollForAssistantMessage 超时，强制退出轮询',
+    )
+  }
+
+  /** Promise-based sleep */
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
   // ==========================================================
