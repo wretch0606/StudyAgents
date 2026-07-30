@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+
+from agents.tests.fake_adapters import FakeModelGateway as RealFakeModelGateway
 from types import SimpleNamespace
 from typing import Any
 
@@ -132,7 +134,7 @@ class QaGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
             [[1.0] + [0.0] * 127],
         )
-        await retriever.set_doc_names({"doc-1": "database.pdf"})
+        await retriever.set_doc_names({"doc-1": "test.pdf"})
 
         graph = build_qa_graph().compile()
         result = await graph.ainvoke(
@@ -150,7 +152,19 @@ class QaGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
             config={
                 "configurable": {
-                    "model": FakeModelGateway(),
+                    "model": RealFakeModelGateway(outputs={
+                        "KnowledgeResult": {
+                            "sufficient": True, "reason": "sufficient",
+                            "knowledge_items": [{"fact": "test", "source_ref_ids": ["chunk-1"], "knowledge_point_ids": []}],
+                            "selected_source_ref_ids": ["chunk-1"],
+                            "requires_vision": False, "public_summary": "test",
+                        },
+                        "QAAnswer": {
+                            "answer": "Transactions provide isolation[test.pdf 第3页].",
+                            "citations": [], "source_ref_ids": ["chunk-1"],
+                            "confidence_note": "", "public_summary": "test",
+                        },
+                    }),
                     "retriever": retriever,
                 }
             },
@@ -158,11 +172,11 @@ class QaGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             result["public_response"],
-            "Transactions provide isolation.",
+            "Transactions provide isolation[test.pdf 第3页].",
             result,
         )
         self.assertEqual(result["evidence"][0]["chunk_id"], "chunk-1")
-        self.assertEqual(result["evidence"][0]["document_name"], "database.pdf")
+        self.assertEqual(result["evidence"][0]["document_name"], "test.pdf")
         self.assertEqual(result["evidence"][0]["page_number"], 3)
 
 
@@ -195,7 +209,7 @@ class PracticeGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
             [[1.0] + [0.0] * 127],
         )
-        await retriever.set_doc_names({"doc-1": "database.pdf"})
+        await retriever.set_doc_names({"doc-1": "test.pdf"})
 
         # 验证 retriever 返回的是数据类对象（真实类型，非 dict）
         real_result = await retriever.retrieve("数据库", filters=None, user_role="admin")
@@ -238,7 +252,7 @@ class PracticeGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         """Day 4 集成：完整状态图执行连续两题，正确选择取得非零满分"""
         from agents.graph_practice import build_practice_graph
         from agents.state import AgentState
-        from agents.tests.fake_adapters import FakeModelGateway, FakeRetriever
+        from agents.tests.fake_adapters import FakeRetriever
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.types import Command
 

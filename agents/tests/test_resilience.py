@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import os
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -273,23 +275,23 @@ async def test_valid_citation_passes():
         )
     ]
 
-    gateway = FakeModelGateway()
+    gateway = FakeModelGateway(outputs={
+        "QAAnswer": {"answer": "测试回答[test.pdf 第1页]。", "citations": [],
+                     "source_ref_ids": ["chunk-test-001"],
+                     "confidence_note": "", "public_summary": "test"}
+    })
     state = _base_state(
         evidence=evidence,
-        knowledge=[
-            {
-                "fact": "一个有效引用的事实",
-                "source_ref_ids": ["chunk-test-001"],  # 在 evidence 中
-                "knowledge_point_ids": [],
-            }
-        ],
+        knowledge=[{
+            "fact": "一个有效引用的事实",
+            "source_ref_ids": ["chunk-test-001"],
+            "knowledge_point_ids": [],
+        }],
     )
     cfg = _config(model=gateway)
-    sink = FakeEventSink()
-    cfg["configurable"]["event_sink"] = sink
+    cfg["configurable"]["event_sink"] = FakeEventSink()
 
     result = await evaluator_qa_node(state, cfg)
-
     assert result.get("next_node") == "__end__", (
         f"有效引用应正常结束，实际 {result.get('next_node')}"
     )
@@ -605,6 +607,73 @@ def run_all():
     print(f"{'=' * 55}\n")
 
     return FAILED == 0
+
+
+# ═══════════════════════════════════════════════════════
+# 8. 引用强制校验（Day6 修复）
+# ═══════════════════════════════════════════════════════
+
+
+_CITE_EVIDENCE = [
+    {"document_name": "数据库讲义.pdf", "page_number": 1, "chunk_id": "chunk-1"},
+    {"document_name": "数据库讲义.pdf", "page_number": 3, "chunk_id": "chunk-2"},
+    {"document_name": "真题卷.pdf", "page_number": 2, "chunk_id": "chunk-3"},
+]
+
+
+@pytest.mark.asyncio
+async def test_citation_fake_doc_rejected():
+    """虚构文档名的引用应被拒绝"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("答案是xxx[不存在的文档 第1页]。", _CITE_EVIDENCE)
+    assert not ok
+    assert "虚构" in err or "不存在" in err or "不存在的文档" in err
+
+
+@pytest.mark.asyncio
+async def test_citation_wrong_page_rejected():
+    """错误页码必须拒绝——项目要求每个结论由实际引用页支持"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("答案是xxx[数据库讲义.pdf 第99页]。", _CITE_EVIDENCE)
+    assert not ok, "错误页码必须被拒绝"
+
+
+@pytest.mark.asyncio
+async def test_citation_no_brackets_rejected():
+    """完全没有引用的回答应被拒绝"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("这是没有引用的答案。", _CITE_EVIDENCE)
+    assert not ok
+
+
+@pytest.mark.asyncio
+async def test_citation_valid_passes():
+    """正确的引用应通过"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("答案是xxx[数据库讲义.pdf 第1页]。", _CITE_EVIDENCE)
+    assert ok, f"应通过但被拒绝: {err}"
+
+
+@pytest.mark.asyncio
+async def test_citation_multiple_valid_passes():
+    """多个正确引用应全部通过"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations(
+        "第一个要点[数据库讲义.pdf 第1页]，第二个要点[数据库讲义.pdf 第3页]。",
+        _CITE_EVIDENCE,
+    )
+    assert ok, f"应通过但被拒绝: {err}"
+
+
+@pytest.mark.asyncio
+async def test_citation_mixed_valid_and_invalid_rejected():
+    """混入一个无效引用就应失败"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations(
+        "正确[数据库讲义.pdf 第1页]，但这个是假的[不存在的书 第5页]。",
+        _CITE_EVIDENCE,
+    )
+    assert not ok
 
 
 if __name__ == "__main__":
