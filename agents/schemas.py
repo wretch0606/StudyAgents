@@ -88,6 +88,6 @@ class QAAnswer(BaseModel):
 
 PROMPT_VERSIONS = {
     "coordinator": "coordinator-v1",
-    "knowledge": "knowledge-v1",
+    "knowledge": "knowledge-v1.1",
     "evaluator": "evaluator-qa-v1",
 }
