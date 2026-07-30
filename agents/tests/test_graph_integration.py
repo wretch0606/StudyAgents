@@ -132,7 +132,7 @@ class QaGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
             [[1.0] + [0.0] * 127],
         )
-        await retriever.set_doc_names({"doc-1": "database.pdf"})
+        await retriever.set_doc_names({"doc-1": "test.pdf"})
 
         graph = build_qa_graph().compile()
         result = await graph.ainvoke(
@@ -195,7 +195,7 @@ class PracticeGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
             [[1.0] + [0.0] * 127],
         )
-        await retriever.set_doc_names({"doc-1": "database.pdf"})
+        await retriever.set_doc_names({"doc-1": "test.pdf"})
 
         # 验证 retriever 返回的是数据类对象（真实类型，非 dict）
         real_result = await retriever.retrieve("数据库", filters=None, user_role="admin")

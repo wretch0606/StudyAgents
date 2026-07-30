@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import os
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -605,6 +607,73 @@ def run_all():
     print(f"{'=' * 55}\n")
 
     return FAILED == 0
+
+
+# ═══════════════════════════════════════════════════════
+# 8. 引用强制校验（Day6 修复）
+# ═══════════════════════════════════════════════════════
+
+
+_CITE_EVIDENCE = [
+    {"document_name": "数据库讲义.pdf", "page_number": 1, "chunk_id": "chunk-1"},
+    {"document_name": "数据库讲义.pdf", "page_number": 3, "chunk_id": "chunk-2"},
+    {"document_name": "真题卷.pdf", "page_number": 2, "chunk_id": "chunk-3"},
+]
+
+
+@pytest.mark.asyncio
+async def test_citation_fake_doc_rejected():
+    """虚构文档名的引用应被拒绝"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("答案是xxx[不存在的文档 第1页]。", _CITE_EVIDENCE)
+    assert not ok
+    assert "虚构" in err or "不存在" in err or "不存在的文档" in err
+
+
+@pytest.mark.asyncio
+async def test_citation_wrong_page_still_passes():
+    """页码偏差不拒绝（内容可能在相邻页），只拒绝虚构文档"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("答案是xxx[数据库讲义.pdf 第99页]。", _CITE_EVIDENCE)
+    assert ok, f"页码偏差应通过（内容可能在相邻页），但被拒绝: {err}"
+
+
+@pytest.mark.asyncio
+async def test_citation_no_brackets_rejected():
+    """完全没有引用的回答应被拒绝"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("这是没有引用的答案。", _CITE_EVIDENCE)
+    assert not ok
+
+
+@pytest.mark.asyncio
+async def test_citation_valid_passes():
+    """正确的引用应通过"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations("答案是xxx[数据库讲义.pdf 第1页]。", _CITE_EVIDENCE)
+    assert ok, f"应通过但被拒绝: {err}"
+
+
+@pytest.mark.asyncio
+async def test_citation_multiple_valid_passes():
+    """多个正确引用应全部通过"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations(
+        "第一个要点[数据库讲义.pdf 第1页]，第二个要点[数据库讲义.pdf 第3页]。",
+        _CITE_EVIDENCE,
+    )
+    assert ok, f"应通过但被拒绝: {err}"
+
+
+@pytest.mark.asyncio
+async def test_citation_mixed_valid_and_invalid_rejected():
+    """混入一个无效引用就应失败"""
+    from agents.graph import _check_citations
+    ok, err = _check_citations(
+        "正确[数据库讲义.pdf 第1页]，但这个是假的[不存在的书 第5页]。",
+        _CITE_EVIDENCE,
+    )
+    assert not ok
 
 
 if __name__ == "__main__":

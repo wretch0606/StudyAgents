@@ -107,15 +107,8 @@ class FakeModelGateway:
             "public_summary": "找到 1 条可引用证据，判断证据充足",
         },
         "QAAnswer": {
-            "answer": "数据库管理系统（DBMS）是用于管理数据的软件系统。",
-            "citations": [
-                {
-                    "document_name": "digital-lecture-intro.pdf",
-                    "page_number": 1,
-                    "question_no": None,
-                    "excerpt_snippet": "数据库管理系统...",
-                }
-            ],
+            "answer": "数据库管理系统（DBMS）是用于管理数据的软件系统[test.pdf 第1页]。",
+            "citations": [],
             "source_ref_ids": ["chunk-test-001"],
             "confidence_note": "",
             "public_summary": "回答已完成引用核验",

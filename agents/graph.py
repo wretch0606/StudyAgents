@@ -174,6 +174,20 @@ def _source_ref_to_state(ref: WorkerSourceRef | Mapping[str, Any]) -> SourceRef:
     )
 
 
+def _check_citations(answer_text: str, evidence: list[dict]) -> tuple[bool, str]:
+    """校验引用指向真实证据文档（模块级，可单测）"""
+    import re as _re
+    _valid_docs = {ref["document_name"] for ref in evidence}
+    _found = _re.findall(r'\[(.+?)\s*第(\d+)\s*页\]', answer_text)
+    if not _found:
+        return False, "回答中完全缺少 [文档名 第X页] 引用标记"
+    for _doc_name, _page in _found:
+        _doc_name = _doc_name.strip()
+        if _doc_name not in _valid_docs:
+            return False, f"引用虚构文档: [{_doc_name} 第{_page}页]"
+    return True, ""
+
+
 # ═══════════════════════════════════════════════════════
 # 节点函数
 # ═══════════════════════════════════════════════════════
@@ -419,15 +433,17 @@ async def evaluator_qa_node(
     )
     answer: QAAnswer = result.output
 
-    # 【Day6 修复】引用准确率：检查 answer 中是否包含 citation 标记
-    import re as _re
-    _citation_in_text = _re.findall(r'\[.+?第\d+页\]', answer.answer)
-    _has_citations = len(_citation_in_text) >= 1
-    if not _has_citations and evidence:
-        import logging as _logging
-        _logging.getLogger(__name__).warning("回答中缺少引用标记，重试一次")
+    # 【Day6 修复】引用准确率 — 强制校验引用必须来自本次 evidence
+    _cite_ok, _cite_err = _check_citations(answer.answer, evidence)
+    if not _cite_ok and evidence:
+        import logging as _logging; _log = _logging.getLogger(__name__)
+        _valid_doc_names = {ref["document_name"] for ref in evidence}
+        _log.warning("回答中引用不合格(%s)，重试一次", _cite_err)
         _retry_msg = EVALUATOR_USER.format(
-            user_input=state.get("user_input", "") + "\n\n【重要提醒】在回答的每句话后面标注引用，格式：[文档名 第X页]。不要只在末尾列来源。",
+            user_input=state.get("user_input", "") + (
+                f"\n\n【强制要求】每句话后面必须标注引用，格式：[文档名 第X页]。"
+                f"可用文档: {', '.join(_valid_doc_names)}。检查要点:{_cite_err}"
+            ),
             knowledge_text=knowledge_text,
             source_refs_text=source_refs_text,
         )
@@ -443,6 +459,16 @@ async def evaluator_qa_node(
         )
         answer = result.output
         state["model_calls"] = state.get("model_calls", 0) + 1
+
+        # 第二次仍不合格 → 报错
+        _cite_ok2, _cite_err2 = _check_citations(answer.answer, evidence)
+        if not _cite_ok2 and evidence:
+            await _emit(state=state, agent="evaluator", event_type="agent.summary",
+                        status="failed",
+                        summary=f"引用核验失败（重试后仍不合格）: {_cite_err2}",
+                        source_refs=evidence, config=config)
+            return _error_return(state, "AGENT_OUTPUT_INVALID",
+                                 f"引用核验失败: {_cite_err2}", True)
 
     await _emit(
         state=state,
