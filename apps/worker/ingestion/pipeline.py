@@ -8,8 +8,16 @@
 """
 
 import logging
+import uuid
 from pathlib import Path
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from apps.api.db.session import _get_sessionmaker
+from apps.api.db.models.document import Document
+from apps.api.db.models.document_page import DocumentPage
+from apps.api.db.models.knowledge_chunk import KnowledgeChunk
 from apps.worker.ingestion.chunker import Chunker
 from apps.worker.ingestion.job_manager import JobManager
 from apps.worker.ingestion.keyword_indexer import KeywordIndexer
@@ -111,6 +119,32 @@ class IngestionPipeline:
         pages = self.parser.parse(str(pdf_path), job.document_id)
         self._set(job.job_id, "pages", pages)
 
+        # 写入 document_pages 表
+        async with _get_sessionmaker()() as db:
+            for p in pages:
+                db.add(DocumentPage(
+                    id=str(uuid.uuid4()),
+                    document_id=job.document_id,
+                    page_no=p.page_no,
+                    raw_text=p.text,
+                    image_path=p.image_path,
+                    char_count=len(p.text),
+                    page_type="digital" if p.is_digital else "scanned",
+                    layout_json=[{
+                        "type": b.block_type.value,
+                        "content": b.content,
+                        "confidence": b.confidence,
+                        "bbox": list(b.bbox),
+                    } for b in p.layout] if p.layout else None,
+                    confidence=p.confidence,
+                ))
+            # 更新文档页数
+            doc = await db.get(Document, job.document_id)
+            if doc:
+                doc.page_count = len(pages)
+                doc.status = "extracting"
+            await db.commit()
+
         await self.job_mgr.update_progress(
             job.job_id, IngestionStage.OCR,
             progress=30.0,
@@ -152,6 +186,27 @@ class IngestionPipeline:
 
         chunks: list[Chunk] = self.chunker.chunk_document(job.document_id, structured)
         self._set(job.job_id, "chunks", chunks)
+
+        # 写入 knowledge_chunks 表
+        async with async_session_factory() as db:
+            for c in chunks:
+                db.add(KnowledgeChunk(
+                    id=c.chunk_id,
+                    document_id=c.document_id,
+                    page_from=c.page_from,
+                    page_to=c.page_to,
+                    question_no=c.question_no,
+                    section_path=" > ".join(c.section_path) if c.section_path else None,
+                    content=c.content,
+                    private_content=c.private_content,
+                    content_hash=c.content_hash,
+                    visibility=c.visibility.value if hasattr(c.visibility, 'value') else str(c.visibility),
+                    material_type=c.material_type.value if hasattr(c.material_type, 'value') else str(c.material_type),
+                    year=c.year,
+                    image_refs=c.image_refs if c.image_refs else None,
+                    embedding_version=c.content_version,
+                ))
+            await db.commit()
 
         await self.job_mgr.update_progress(
             job.job_id, IngestionStage.VECTORIZING,
