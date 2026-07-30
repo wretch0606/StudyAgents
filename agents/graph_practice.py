@@ -25,7 +25,6 @@ Day 6 修复（V1.1）：
 # LangGraph 需要运行时解析 config 参数的类型标注来识别 RunnableConfig。
 
 import uuid
-from collections.abc import Mapping
 from typing import Any, Optional
 
 try:
@@ -48,13 +47,11 @@ except ImportError:
 
 from .graph import (
     _build_messages,
-    _configurable,
     _emit,
     _error_return,
     _limits_exceeded,
     _require_dependency,
     _build_worker_filters,
-    _source_ref_to_state,
     MAX_EVIDENCE,
     MAX_MODEL_CALLS,
     MAX_NODE_HOPS,
@@ -73,10 +70,6 @@ from .rules.grading import (
 )
 
 # ── 提示词 ──
-from .prompts.coordinator import (
-    SYSTEM_PROMPT as COORDINATOR_SYSTEM,
-    USER_MESSAGE_TEMPLATE as COORDINATOR_USER,
-)
 from .prompts.questioner import (
     SYSTEM_PROMPT as QUESTIONER_SYSTEM,
     USER_MESSAGE_TEMPLATE as QUESTIONER_USER,

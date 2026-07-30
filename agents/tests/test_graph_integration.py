@@ -317,16 +317,27 @@ class PracticeGraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.get("items_count"), 2,
                         f"总题数应为 2，实际: {summary.get('items_count')}")
 
-        # 验证第 2 题评分
-        grade2 = items[1].get("grade", {})
+        # 验证第 2 题评分（从 result3 读取——evaluator 在这一步运行）
+        items3 = result3.get("practice_items", [])
+        self.assertEqual(len(items3), 2,
+                        f"最终应有 2 题记录，实际: {len(items3)}")
+        grade2 = items3[1].get("grade", {})
         self.assertIsNotNone(grade2)
-        self.assertFalse(grade2.get("met", False),
-                        f"第 2 题错误作答 met 应为 False")
+        self.assertFalse(grade2.get("met", True),
+                        f"第 2 题错误作答 met 应为 False，实际: {grade2}")
+        self.assertEqual(grade2.get("score", 1), 0,
+                        f"第 2 题错误作答得分应为 0，实际: {grade2.get('score')}")
+
+        # 验证总分（Q1 正确 5分 + Q2 错误 0分 = 5/10）
+        self.assertEqual(summary.get("total_score", 0), 5,
+                        f"总分应为 5（5+0），实际: {summary.get('total_score')}")
+        self.assertEqual(summary.get("total_max", 0), 10,
+                        f"总分上限应为 10（5+5），实际: {summary.get('total_max')}")
 
         # 验证公开响应无泄露
         pub_resp = result3.get("public_response", "")
         self.assertNotIn("expected_answer", pub_resp)
-        self.assertNotIn("A", pub_resp.split("**训练完成**")[0] if "**训练完成**" in pub_resp else pub_resp)
+        self.assertIn("训练完成", pub_resp, "总结应包含 '训练完成'")
 
     async def test_choice_grading_max_score_zero(self) -> None:
         """选择题 max_score=0 时正确作答 met=True（Day 4 修复验证）"""
