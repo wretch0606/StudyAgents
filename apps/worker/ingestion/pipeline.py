@@ -8,6 +8,7 @@
 """
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -93,6 +94,39 @@ class IngestionPipeline:
         pages = self.parser.parse(str(file_path), job.document_id)
         self._set(job.job_id, "pages", pages)
 
+        # 写入 document_pages 表（B 持久化补丁 — PR41）
+        from apps.api.db.session import _get_sessionmaker as _gsm
+        from apps.api.db.models.document import Document
+        from apps.api.db.models.document_page import DocumentPage
+        async with _gsm()() as db:
+            # 幂等：重新导入同一文档时先清理旧数据
+            from sqlalchemy import delete as sa_delete
+            await db.execute(sa_delete(DocumentPage).where(
+                DocumentPage.document_id == job.document_id,
+            ))
+            for p in pages:
+                db.add(DocumentPage(
+                    id=str(uuid.uuid4()),
+                    document_id=job.document_id,
+                    page_no=p.page_no,
+                    raw_text=p.text,
+                    image_path=p.image_path,
+                    char_count=len(p.text),
+                    page_type="digital" if p.is_digital else "scanned",
+                    layout_json=[{
+                        "type": b.block_type.value,
+                        "content": b.content,
+                        "confidence": b.confidence,
+                        "bbox": list(b.bbox),
+                    } for b in p.layout] if p.layout else None,
+                    confidence=p.confidence,
+                ))
+            doc = await db.get(Document, job.document_id)
+            if doc:
+                doc.page_count = len(pages)
+                doc.status = "extracting"
+            await db.commit()
+
         await self.job_mgr.update_progress(
             job.job_id, IngestionStage.OCR,
             progress=30.0,
@@ -134,6 +168,34 @@ class IngestionPipeline:
 
         chunks: list[Chunk] = self.chunker.chunk_document(job.document_id, structured)
         self._set(job.job_id, "chunks", chunks)
+
+        # 写入 knowledge_chunks 表（B 持久化补丁 — PR41）
+        from apps.api.db.session import _get_sessionmaker as _gsm
+        from apps.api.db.models.knowledge_chunk import KnowledgeChunk
+        async with _gsm()() as db:
+            # 幂等：重新导入同一文档时先清理旧数据
+            from sqlalchemy import delete as sa_delete
+            await db.execute(sa_delete(KnowledgeChunk).where(
+                KnowledgeChunk.document_id == job.document_id,
+            ))
+            for c in chunks:
+                db.add(KnowledgeChunk(
+                    id=c.chunk_id,
+                    document_id=c.document_id,
+                    page_from=c.page_from,
+                    page_to=c.page_to,
+                    question_no=getattr(c, "question_no", None),
+                    section_path=" > ".join(c.section_path) if c.section_path else None,
+                    content=c.content,
+                    private_content=getattr(c, "private_content", None),
+                    content_hash=c.content_hash,
+                    visibility=c.visibility.value if hasattr(c.visibility, "value") else str(c.visibility),
+                    material_type=c.material_type.value if hasattr(c.material_type, "value") else str(c.material_type),
+                    year=getattr(c, "year", None),
+                    image_refs=getattr(c, "image_refs", None),
+                    embedding_version=str(cv) if (cv := getattr(c, "content_version", None)) is not None else None,
+                ))
+            await db.commit()
 
         await self.job_mgr.update_progress(
             job.job_id, IngestionStage.VECTORIZING,
@@ -233,7 +295,7 @@ class IngestionHandler:
                 error_message=f"文档 {document_id} 没有持久化文件路径",
             )
 
-        # 驱动入库管线（每个阶段使用独立 DB 会话）
+        # 驱动入库管线（循环推进全部阶段直到完成）
         async with _get_sessionmaker()() as db_session:
             job_mgr = JobManager(db_session)
             pipeline = IngestionPipeline(job_manager=job_mgr)
@@ -244,6 +306,24 @@ class IngestionHandler:
                 job_id=task.task_id, document_id=document_id,
                 stage=IngestionStage.EXTRACTING,
             )
-            await pipeline.run(b_job)
+            # 循环推进 8 个阶段直到 COMPLETING
+            for _ in range(8):
+                previous = b_job.stage
+                try:
+                    await pipeline.run(b_job)
+                except Exception:
+                    return WorkerResult(
+                        task_id=task.task_id, success=False,
+                        error_code="PIPELINE_FAILED",
+                        error_message=f"阶段 {b_job.stage.value} 失败",
+                    )
+                if b_job.stage == IngestionStage.COMPLETING:
+                    break
+                if b_job.stage == previous:
+                    return WorkerResult(
+                        task_id=task.task_id, success=False,
+                        error_code="STAGE_STUCK",
+                        error_message=f"阶段未推进: {b_job.stage.value}",
+                    )
 
         return WorkerResult(task_id=task.task_id, success=True, output={})

@@ -80,27 +80,29 @@ class LangGraphAgentRunner:
             "user_answer": None,
         }
 
-        # 依赖注入（使用 B 提供的真实 HybridRetriever）
-        from apps.worker.retrieval.retriever import HybridRetriever
-        config = {
-            "configurable": {
-                "thread_id": f"thread-{_uuid.uuid4().hex[:16]}",
-                "model": model_gateway,
-                "event_sink": event_sink,
-                "retriever": HybridRetriever(),
+        # 依赖注入（使用 D 提供的 DB-backed retriever + DB session）
+        from apps.api.db.session import _get_sessionmaker
+        maker = _get_sessionmaker()
+        async with maker() as db_session:
+            config = {
+                "configurable": {
+                    "thread_id": f"thread-{_uuid.uuid4().hex[:16]}",
+                    "model": model_gateway,
+                    "event_sink": event_sink,
+                    "retriever": _DbRetriever(),
+                    "db_session": db_session,
+                }
             }
-        }
-
-        try:
-            result = await graph.ainvoke(initial_state, config=config)
-        except Exception as exc:
-            import traceback
-            elapsed = int((datetime.now(UTC) - start).total_seconds() * 1000)
-            logger.error(
-                "LangGraph run %s failed: %s\n%s",
-                run_id, exc, traceback.format_exc(),
-            )
-            return AgentRunResult(
+            try:
+                result = await graph.ainvoke(initial_state, config=config)
+            except Exception as exc:
+                import traceback
+                elapsed = int((datetime.now(UTC) - start).total_seconds() * 1000)
+                logger.error(
+                    "LangGraph run %s failed: %s\n%s",
+                    run_id, exc, traceback.format_exc(),
+                )
+                return AgentRunResult(
                 status="failed",
                 error_code=type(exc).__name__,
                 error_message=str(exc)[:500],
@@ -119,15 +121,82 @@ class LangGraphAgentRunner:
         )
 
 
-class _StubRetriever:
-    """B 成员未接入时的空检索器，返回空结果让链路可跑通。"""
+class _DbRetriever:
+    """从 knowledge_chunks 表直接检索的 DB 检索器。
+
+    B 的 InMemory 后端无法跨进程共享（ingestion 在 Worker，QA 在 API）。
+    因此 D 提供此 DB-backed 检索器作为过渡方案，查询 knowledge_chunks 表。
+    """
 
     async def retrieve(self, *, query, filters, user_role):
         from dataclasses import dataclass, field
 
+        from sqlalchemy import select as sa_select
+
+        from apps.api.db.models.knowledge_chunk import KnowledgeChunk
+        from apps.api.db.session import _get_sessionmaker
+
         @dataclass
-        class _Empty:
+        class _Result:
             source_refs: list = field(default_factory=list)
 
-        return _Empty()
+        @dataclass
+        class _SourceRef:
+            document_id: str
+            document_name: str
+            page_number: int
+            chunk_id: str
+            excerpt: str
+
+        try:
+            import logging
+            _log = logging.getLogger(__name__)
+            async with _get_sessionmaker()() as s:
+                # 中文逐字拆分 + 英文空格分词
+                import re
+                raw_terms = re.split(r"[\s,，。！？、]+", query.strip())
+                # 对每个词按单字拆分（中文）或保留（英文）
+                all_terms = []
+                for t in raw_terms:
+                    if not t:
+                        continue
+                    if re.search(r"[一-鿿]", t):
+                        # 中文：逐字 + 2-3字组合
+                        all_terms.append(t)
+                        for i in range(len(t)):
+                            all_terms.append(t[i:i+1])
+                            if i + 2 <= len(t):
+                                all_terms.append(t[i:i+2])
+                    else:
+                        all_terms.append(t)
+                # 去重，取前20个
+                terms = list(dict.fromkeys(all_terms))[:20]
+                stmt = sa_select(KnowledgeChunk)
+                if terms:
+                    from sqlalchemy import or_
+                    conditions = [
+                        KnowledgeChunk.content.ilike(f"%{t}%")
+                        for t in terms
+                    ]
+                    stmt = stmt.where(or_(*conditions))
+                stmt = stmt.limit(20)
+                result = await s.execute(stmt)
+                chunks = result.scalars().all()
+                _log.info("_DbRetriever: query=%r terms=%d found=%d chunks",
+                          query[:80], len(terms), len(chunks))
+
+            refs = []
+            for i, c in enumerate(chunks[:8]):
+                refs.append(_SourceRef(
+                    document_id=str(c.document_id),
+                    document_name=f"doc-{str(c.document_id)[:8]}",
+                    page_number=c.page_from,
+                    chunk_id=str(c.id),
+                    excerpt=c.content[:300],
+                ))
+            return _Result(source_refs=refs)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error("_DbRetriever failed: %s", exc)
+            return _Result(source_refs=[])
 

@@ -274,14 +274,31 @@ async def knowledge_node(
         for ref in retrieval_result.source_refs[:MAX_EVIDENCE]
     ]
 
+    # 构建 REF 标签映射（REF_1 → 真实 chunk_id）
+    ref_map: dict[str, str] = {}
+    evidence_lines: list[str] = []
+    for i, ref in enumerate(evidence):
+        label = f"REF_{i + 1}"
+        ref_map[label] = ref["chunk_id"]
+        evidence_lines.append(
+            f"[{label}] {ref['document_name']} 第{ref['page_number']}页: {ref['excerpt']}"
+        )
+    evidence_text = "\n---\n".join(evidence_lines) if evidence_lines else "（无检索结果）"
+
     # Step 2: LLM 整理知识
     state["model_calls"] = state.get("model_calls", 0) + 1
 
-    # 将 evidence 格式化为文本（给模型阅读）
-    evidence_text = "\n---\n".join(
-        f"[{i+1}] {ref['document_name']} 第{ref['page_number']}页: {ref['excerpt']}"
-        for i, ref in enumerate(evidence)
-    ) if evidence else "（无检索结果）"
+    # 注入 REF 标签规则到 system prompt
+    ref_rule = (
+        "\n## 引用规则（严格遵守）\n"
+        "只能使用以下 REF 标签格式引用证据："
+        + ", ".join(ref_map.keys())
+        + "\n"
+        "禁止使用 document_id、URL 或自造标识符。\n"
+        "source_ref_ids 必须填写 REF 标签，如 [\"REF_1\", \"REF_3\"]。\n"
+        "selected_source_ref_ids 同理。"
+    )
+    sys_prompt = KNOWLEDGE_SYSTEM + ref_rule
 
     user_msg = KNOWLEDGE_USER.format(
         normalized_query=state.get("normalized_query", state.get("user_input", "")),
@@ -289,7 +306,7 @@ async def knowledge_node(
         filters=filters,
         user_role="member",
     )
-    messages = _build_messages(KNOWLEDGE_SYSTEM, user_msg)
+    messages = _build_messages(sys_prompt, user_msg)
 
     result = await model.invoke_structured(
         run_id=state["run_id"],
@@ -301,6 +318,17 @@ async def knowledge_node(
         temperature=0.0,
     )
     kr: KnowledgeResult = result.output
+
+    # 将 REF 标签映射回真实 chunk_id
+    for item in kr.knowledge_items:
+        mapped_ids = []
+        for rid in item.source_ref_ids:
+            mapped_ids.append(ref_map.get(rid, rid))
+        item.source_ref_ids = mapped_ids
+    mapped_selected = []
+    for rid in kr.selected_source_ref_ids:
+        mapped_selected.append(ref_map.get(rid, rid))
+    kr.selected_source_ref_ids = mapped_selected
 
     # 发布事件
     sufficiency_label = "充足" if kr.sufficient else "不足"
@@ -506,12 +534,37 @@ async def _emit(
     if sink is None:
         return  # D 的代码尚未合入，静默跳过
 
+    # 将内部 TypedDict SourceRef 映射为 Pydantic SourceRef（去除不被 schema 接受的字段）
+    _ALLOWED_REF_KEYS = {"document_id", "document_name", "page_no", "question_no",
+                         "chunk_id", "excerpt", "page_image_url"}
+    mapped_refs = []
+    for ref in (source_refs or []):
+        if isinstance(ref, dict):
+            mapped = {}
+            for k, v in ref.items():
+                if k == "page_number":
+                    mapped["page_no"] = v
+                elif k in _ALLOWED_REF_KEYS:
+                    mapped[k] = v
+            if "page_no" not in mapped and "page_number" not in ref:
+                pass  # keep as-is if no page field
+            mapped_refs.append(mapped)
+        else:
+            # dataclass or object: filter allowed attributes
+            mapped = {}
+            for k in _ALLOWED_REF_KEYS:
+                if hasattr(ref, k):
+                    mapped[k] = getattr(ref, k)
+            if hasattr(ref, "page_number") and "page_no" not in mapped:
+                mapped["page_no"] = getattr(ref, "page_number")
+            mapped_refs.append(mapped)
+
     draft = AgentEventDraft(
         agent=agent,
         event_type=event_type,
         status=status,
         summary=summary,
-        source_refs=source_refs or [],
+        source_refs=mapped_refs,
         duration_ms=0,
     )
     db = configurable.get("db_session")

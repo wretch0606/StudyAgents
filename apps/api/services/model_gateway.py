@@ -228,16 +228,25 @@ class OpenAIAdapter:
         temperature: float | None,
         max_tokens: int | None,
     ) -> dict[str, Any]:
+        # 将 JSON Schema 注入 system prompt（DashScope 不支持 json_schema）
+        import json as _json
+        schema_text = _json.dumps(
+            output_schema.model_json_schema(), ensure_ascii=False,
+        )
+        schema_hint = (
+            "请只输出合法 JSON，不要输出 Markdown 代码块或解释文字。"
+            f"输出必须符合以下 JSON Schema：\n{schema_text}"
+        )
+        msg_list = [m.model_dump() for m in messages]
+        if msg_list and msg_list[0]["role"] == "system":
+            msg_list[0]["content"] = f"{msg_list[0]['content']}\n\n{schema_hint}"
+        else:
+            msg_list.insert(0, {"role": "system", "content": schema_hint})
+
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": [m.model_dump() for m in messages],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": output_schema.__name__,
-                    "schema": output_schema.model_json_schema(),
-                },
-            },
+            "messages": msg_list,
+            "response_format": {"type": "json_object"},
         }
         if temperature is not None:
             body["temperature"] = temperature
