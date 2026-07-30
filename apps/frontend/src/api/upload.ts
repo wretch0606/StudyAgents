@@ -16,16 +16,39 @@
 // 上传响应类型
 // ============================================================
 
-/** POST /api/documents 响应（仅管理员） */
+/** POST /api/documents 响应（仅管理员）
+ *  后端实际返回：{ state, document: {id, name, ...}, ingestion_job: {...} } */
 export interface KnowledgeUploadResponse {
-  /** 文档 ID */
-  id: string
-  /** 文档名称 */
-  name: string
-  /** 处理状态 */
-  status: string
-  /** 文件大小（字节） */
-  size_bytes: number
+  state: string
+  document: {
+    id: string
+    name: string
+    sha256?: string
+    mime?: string
+    status?: string
+    version?: number
+    size_bytes?: number
+    page_count?: number
+    year?: string
+    metadata?: Record<string, unknown>
+    created_at?: string
+    updated_at?: string
+  }
+  ingestion_job?: {
+    id: string
+    document_id: string
+    stage: string
+    status: string
+    progress: number
+    error_code: string | null
+    error_summary: string | null
+    attempts: number
+    retry_count: number
+    started_at: string | null
+    finished_at: string | null
+    created_at: string
+    updated_at: string
+  }
 }
 
 /** 聊天附件上传响应（客户端处理，无服务端上传） */

@@ -110,7 +110,8 @@ interface SseEvent {
   event_type: string
   status: string
   summary: string
-  source_refs: SourceRefDisplay[]
+  /** 后端原始 SourceRef 数组 — 需经 mapSourceRef 映射为 SourceRefDisplay */
+  source_refs: Record<string, unknown>[]
   duration_ms: number | null
 }
 
@@ -425,12 +426,13 @@ export const useChatStore = defineStore('chat', () => {
     disconnectSSE()
 
     // 拼接附件信息到 user_input（后端 QA 端点不接收独立的 attachments 字段）
+    // 包含完整 Data URL，确保后端可读取文件内容
     let fullInput = userInput
     if (attachments && attachments.length > 0) {
       const doneAtts = attachments.filter((a) => a.uploadStatus === 'done')
       if (doneAtts.length > 0) {
         const attInfo = doneAtts
-          .map((a) => `[附件: ${a.fileName} (${a.fileSize} bytes)]`)
+          .map((a) => `[附件: ${a.fileName} (${a.fileSize} bytes)]\n[文件内容: ${a.fileUrl}]`)
           .join('\n')
         fullInput = `${attInfo}\n\n${userInput}`
       }
@@ -518,26 +520,13 @@ export const useChatStore = defineStore('chat', () => {
       activeEventSource = eventSource
 
       eventSource.onmessage = (event) => {
-        // 处理无事件名的默认消息块（SSE data-only 消息）
-        // 后端可能通过 message/chunk 事件或纯 data 行发送流式文本
         const rawData = event.data
 
         try {
           const evt: SseEvent = JSON.parse(rawData)
 
-          // 更新 Agent 轨迹
+          // 结构化 JSON 事件 → 仅更新 Agent 轨迹和溯源引用，绝不作为回答正文
           updateAgentTraceFromSSE(evt)
-
-          // 流式文本：event_type 为 message / chunk / token，或 summary 非空且非纯状态描述
-          const isContentEvent =
-            evt.event_type === 'message' ||
-            evt.event_type === 'chunk' ||
-            evt.event_type === 'token' ||
-            (!!evt.summary && !isStatusOnlySummary(evt.summary))
-
-          if (isContentEvent && evt.summary) {
-            appendStreamChunk(evt.summary)
-          }
 
           // source_refs 更新
           if (evt.source_refs && evt.source_refs.length > 0) {
@@ -553,7 +542,7 @@ export const useChatStore = defineStore('chat', () => {
             resolve()
           }
         } catch {
-          // 非 JSON 消息 — 可能是纯文本流式块（SSE data-only）
+          // 非 JSON 消息 → 这才是真正的回答正文流式块（SSE data-only 纯文本行）
           if (rawData && rawData.trim()) {
             appendStreamChunk(rawData)
           }
@@ -589,22 +578,6 @@ export const useChatStore = defineStore('chat', () => {
       trace.durationMs = evt.duration_ms
     }
     currentAgentTraces.value = [...traces]
-  }
-
-  /** 判断 summary 是否仅为 Agent 状态描述（非内容文本） */
-  function isStatusOnlySummary(summary: string): boolean {
-    const statusPatterns = [
-      /^正在/,
-      /^等待/,
-      /^意图解析/,
-      /^检索完成/,
-      /^验证/,
-      /^评测完成/,
-      /^题目生成/,
-      /^待命/,
-      /^当前为/,
-    ]
-    return statusPatterns.some((p) => p.test(summary))
   }
 
   /** 将后端 SourceRef 映射为前端 SourceRefDisplay */

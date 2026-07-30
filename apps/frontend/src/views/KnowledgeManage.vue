@@ -134,7 +134,7 @@ async function processFile(file: File): Promise<void> {
     if (t) {
       t.progress = 100
       t.status = 'processing'
-      t.fileId = res.file_id
+      t.fileId = res.document.id
     }
   } catch (err: any) {
     clearInterval(progressTimer)

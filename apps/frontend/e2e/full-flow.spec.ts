@@ -117,18 +117,18 @@ test.describe('全链路自动化：登录 → 问答 → 训练 → 错题本',
     await expect(typingIndicator).not.toBeVisible({ timeout: 60_000 })
     await page.waitForTimeout(500)
 
-    // 验证新消息已追加
+    // 验证消息数严格 +2（用户消息 + 助手回复），排除历史消息干扰
     const newMessageCount = await page.locator('.messages-inner .message-row').count()
-    expect(newMessageCount).toBeGreaterThanOrEqual(messageCount + 1)
+    expect(newMessageCount).toBe(messageCount + 2)
 
-    // 断言 AI 助手回复气泡已渲染（非空内容）
+    // 断言最新一条助手气泡包含真实回复文本（非空，非纯状态描述）
     const assistantBubbles = page.locator('.bubble.assistant, .message-row.assistant')
     const assistantCount = await assistantBubbles.count()
     expect(assistantCount).toBeGreaterThanOrEqual(1)
-    // 助手气泡内容不应为空
     const lastAssistantContent = await assistantBubbles.last().textContent()
     expect(lastAssistantContent).toBeTruthy()
-    expect(lastAssistantContent!.trim().length).toBeGreaterThan(0)
+    // 真实回答应有足够长度，不应只是状态短语（如"正在检索…"、"等待意图解析…"等）
+    expect(lastAssistantContent!.trim().length).toBeGreaterThan(20)
 
     // ==========================================================
     // Phase 4: PDF 文档导入按钮

@@ -84,6 +84,12 @@ function switchMode(mode: NavMode) {
 /** 是否已进入答题模式（false = 章节选择，true = 答题区） */
 const isTraining = ref(false)
 
+/** 训练创建中（用于按钮 loading 状态） */
+const trainingCreating = ref(false)
+
+/** 当前题目的题干文本（来自后端 createPracticeSession 响应中的 stem） */
+const currentPracticeStem = ref('')
+
 /** 选中的章节 */
 const selectedChapter = ref('')
 
@@ -96,32 +102,35 @@ const selectedDifficulty = ref('')
 /** 选中的题目数量 */
 const selectedCount = ref('5')
 
-/** 开始训练：收集配置参数 → 初始化 Agent 轨迹 → 切换至答题编辑器 */
-function startTraining() {
-  const config = {
-    chapter: selectedChapter.value,
-    type: selectedType.value,
-    difficulty: selectedDifficulty.value,
-    count: selectedCount.value,
-  }
-  console.log('[专项训练] 训练配置参数：', config)
+/** 开始训练：收集配置参数 → 调用后端 API → 成功后切换至答题编辑器 */
+async function startTraining() {
+  if (trainingCreating.value) return
+  trainingCreating.value = true
 
-  isTraining.value = true
-  isSubmitted.value = false
-  evaluationReport.value = null
-  trainingAnswer.value = ''
-  // 调用真实后端创建训练会话（异步出题）
-  chatStore.createPracticeSession({
-    chapterIds: [selectedChapter.value],
-    questionTypes: [selectedType.value],
-    difficulty: selectedDifficulty.value,
-    count: Number(selectedCount.value) || 5,
-  }).then((result) => {
-    if (result) {
-      // 题目已由后端生成，更新当前题目版本号
-      console.log('[专项训练] 训练会话已创建:', result)
+  try {
+    // 调用真实后端创建训练会话（异步出题）
+    const result = await chatStore.createPracticeSession({
+      chapterIds: [selectedChapter.value],
+      questionTypes: [selectedType.value],
+      difficulty: selectedDifficulty.value,
+      count: Number(selectedCount.value) || 5,
+    })
+
+    if (!result) {
+      // createPracticeSession 内部已 ElMessage.error 提示
+      return
     }
-  })
+
+    // API 成功 → 提取真实题目 stem 并进入答题界面
+    currentPracticeStem.value = result.questionText
+    isTraining.value = true
+    isSubmitted.value = false
+    evaluationReport.value = null
+    trainingAnswer.value = ''
+    console.log('[专项训练] 训练会话已创建:', result)
+  } finally {
+    trainingCreating.value = false
+  }
 }
 
 /** 返回章节选择 */
@@ -130,6 +139,7 @@ function backToSelect() {
   isSubmitted.value = false
   evaluationReport.value = null
   trainingAnswer.value = ''
+  currentPracticeStem.value = ''
   selectedType.value = ''
   selectedDifficulty.value = ''
   chatStore.clearAgentTraces()
@@ -218,10 +228,10 @@ function applyMasteryDegradation(chapter: string, score: number, total: number) 
 }
 
 /** 当前题目题干（纯文本，用于错题本存储）
- *  从模板 .pqc-prompt 的 DOM 文本内容获取真实后端题目 */
+ *  优先使用后端 API 返回的 stem，回退到 DOM 内容 */
 const currentQuestionText = computed(() => {
-  // 优先使用后端返回的 stem（已在 createPracticeSession 中存储）
-  // 回退到 DOM 内容
+  if (currentPracticeStem.value) return currentPracticeStem.value
+  // 回退到 DOM 内容（兼容旧数据）
   if (typeof document !== 'undefined') {
     const promptEl = document.querySelector('.pqc-prompt')
     if (promptEl) {
@@ -443,21 +453,26 @@ async function handleSend() {
   const text = inputText.value.trim()
   if (!text || isStreaming.value) return
 
-  // 1. 将用户输入作为新消息加入 Store（含附件）
+  // 1. 拍照当前附件列表（后续 clearAttachments 会清空 store，提前保存引用）
+  const currentAttachments = attachments.value.length > 0 ? [...attachments.value] : undefined
+
+  // 2. 将用户输入作为新消息加入 Store（含附件）
   chatStore.addMessage({
     id: `m${Date.now()}`,
     role: 'user',
     content: text,
     timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-    attachments: attachments.value.length > 0 ? [...attachments.value] : undefined,
+    attachments: currentAttachments,
   })
 
-  // 2. 清空输入框 + 已发送的附件
+  // 3. 清空输入框（附件在请求发送成功后再清除）
   inputText.value = ''
-  chatStore.clearAttachments()
 
-  // 3. 调用真实后端 SSE 流式问答（含附件信息）
-  await chatStore.startQa(text, attachments.value.length > 0 ? [...attachments.value] : undefined)
+  // 4. 调用真实后端 SSE 流式问答（含附件信息）
+  await chatStore.startQa(text, currentAttachments)
+
+  // 5. 请求发送成功后，清空已发送的附件
+  chatStore.clearAttachments()
 
   await nextTick()
   scrollToBottom()
@@ -882,10 +897,11 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               type="primary"
               size="large"
               round
-              :disabled="!selectedChapter || !selectedType || !selectedDifficulty"
+              :loading="trainingCreating"
+              :disabled="!selectedChapter || !selectedType || !selectedDifficulty || trainingCreating"
               @click="startTraining"
             >
-              开始训练
+              {{ trainingCreating ? '创建训练中…' : '开始训练' }}
             </el-button>
           </div>
         </div>
@@ -915,9 +931,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               <span class="pqc-num">第 1 题</span>
               <span class="pqc-type">综合问答</span>
             </div>
-            <p class="pqc-prompt">
-              请简述 TCP 拥塞控制中<strong>慢启动</strong>与<strong>拥塞避免</strong>两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。
-            </p>
+            <p class="pqc-prompt" v-html="renderMixedHtml(currentPracticeStem || '题目加载中…')" />
 
             <!-- 作答区：编辑器 + 实时预览（KaTeXEditor 内置双栏布局） -->
             <KaTeXEditor
