@@ -46,5 +46,5 @@ def created_at_col():
 def updated_at_col():
     """更新时间列（UTC），自动更新。"""
     return mapped_column(
-        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+        DateTime, default=utcnow, onupdate=utcnow, server_default=func.now(), nullable=False
     )
