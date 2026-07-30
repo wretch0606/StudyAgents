@@ -7,10 +7,11 @@
 每个阶段持久化进度，支持断点续跑。
 """
 
+import hashlib
 import logging
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from apps.worker.ingestion.chunker import Chunker
 from apps.worker.ingestion.job_manager import JobManager
@@ -36,8 +37,9 @@ class IngestionPipeline:
     def __init__(
         self,
         job_manager: JobManager,
-        retriever: Optional[HybridRetriever] = None,
-        ocr_engine: Optional[OCRInterface] = None,
+        retriever: HybridRetriever | None = None,
+        ocr_engine: OCRInterface | None = None,
+        db_session: Any | None = None,
     ):
         self.job_mgr = job_manager
         self.retriever = retriever or HybridRetriever()
@@ -47,6 +49,7 @@ class IngestionPipeline:
         self.chunker = Chunker()
         self.vectorizer = Vectorizer()
         self.keyword_indexer = KeywordIndexer()
+        self.db_session = db_session
         self._stash: dict[str, dict] = {}  # 生产环境应替换为数据库读写
 
     def _get(self, job_id: str, key: str):
@@ -60,8 +63,14 @@ class IngestionPipeline:
 
     # ---- 主入口 ----
 
-    async def run(self, job: IngestionJob):
-        """执行完整导入管线"""
+    async def run(
+        self,
+        job: IngestionJob,
+        source_path: str | Path | None = None,
+    ):
+        """执行当前导入阶段，并将真实源文件路径保留到后续阶段。"""
+        if source_path is not None:
+            self._set(job.job_id, "source_path", str(Path(source_path).resolve()))
         logger.info(f"[{job.job_id}] 开始导入，阶段: {job.stage.value}")
         try:
             dispatch = {
@@ -81,57 +90,95 @@ class IngestionPipeline:
                 logger.warning(f"[{job.job_id}] 未知阶段: {job.stage.value}")
         except Exception as e:
             logger.error(f"[{job.job_id}] {job.stage.value} 失败: {e}")
-            retryable = not isinstance(e, (ValueError, FileNotFoundError))
+            retryable = not isinstance(e, ValueError | FileNotFoundError)
             await self.job_mgr.fail_job(job.job_id, str(e), retryable=retryable)
             raise
+
+    async def run_to_completion(
+        self,
+        job: IngestionJob,
+        source_path: str | Path,
+    ) -> None:
+        """从当前阶段连续运行到完成，防止阶段未推进时无限循环。"""
+        for _ in range(8):
+            previous_stage = job.stage
+            await self.run(job, source_path=source_path)
+            if previous_stage == IngestionStage.COMPLETING:
+                return
+            if job.stage == previous_stage:
+                failure = getattr(self.job_mgr, "last_error", None)
+                raise RuntimeError(failure or f"导入阶段未推进: {job.stage.value}")
+        raise RuntimeError("导入管线超过最大阶段数")
 
     # ---- 各阶段 ----
 
     async def _do_extract(self, job: IngestionJob):
         await self.job_mgr.update_progress(job.job_id, IngestionStage.EXTRACTING, 5.0)
 
-        file_path = self._get(job.job_id, "file_path") or _find_sample_pdf()
-        pages = self.parser.parse(str(file_path), job.document_id)
+        source_path = self._get(job.job_id, "source_path")
+        pdf_path = Path(source_path) if source_path else _find_sample_pdf()
+        if not pdf_path.is_file():
+            raise FileNotFoundError(f"导入源文件不存在: {pdf_path}")
+        pages = self.parser.parse(str(pdf_path), job.document_id)
         self._set(job.job_id, "pages", pages)
 
-        # 写入 document_pages 表（B 持久化补丁 — PR41）
-        from apps.api.db.session import _get_sessionmaker as _gsm
-        from apps.api.db.models.document import Document
-        from apps.api.db.models.document_page import DocumentPage
-        async with _gsm()() as db:
-            # 幂等：重新导入同一文档时先清理旧数据
-            from sqlalchemy import delete as sa_delete
-            await db.execute(sa_delete(DocumentPage).where(
-                DocumentPage.document_id == job.document_id,
-            ))
-            for p in pages:
-                db.add(DocumentPage(
-                    id=str(uuid.uuid4()),
-                    document_id=job.document_id,
-                    page_no=p.page_no,
-                    raw_text=p.text,
-                    image_path=p.image_path,
-                    char_count=len(p.text),
-                    page_type="digital" if p.is_digital else "scanned",
-                    layout_json=[{
-                        "type": b.block_type.value,
-                        "content": b.content,
-                        "confidence": b.confidence,
-                        "bbox": list(b.bbox),
-                    } for b in p.layout] if p.layout else None,
-                    confidence=p.confidence,
-                ))
-            doc = await db.get(Document, job.document_id)
-            if doc:
-                doc.page_count = len(pages)
-                doc.status = "extracting"
-            await db.commit()
+        await self._persist_pages(job.document_id, pages)
 
         await self.job_mgr.update_progress(
             job.job_id, IngestionStage.OCR,
             progress=30.0,
         )
         job.stage = IngestionStage.OCR
+
+    async def _persist_pages(
+        self,
+        document_id: str,
+        pages: list[PageResult],
+    ) -> None:
+        """在生产数据库会话可用时幂等写入页面；纯单元测试不连接数据库。"""
+        if self.db_session is None:
+            return
+
+        from sqlalchemy import delete as sa_delete
+
+        from apps.api.db.models.document import Document
+        from apps.api.db.models.document_page import DocumentPage
+
+        await self.db_session.execute(
+            sa_delete(DocumentPage).where(
+                DocumentPage.document_id == document_id,
+            )
+        )
+        for page in pages:
+            self.db_session.add(
+                DocumentPage(
+                    id=str(uuid.uuid4()),
+                    document_id=document_id,
+                    page_no=page.page_no,
+                    raw_text=page.text,
+                    image_path=page.image_path,
+                    char_count=len(page.text),
+                    page_type="digital" if page.is_digital else "scanned",
+                    layout_json=[
+                        {
+                            "type": block.block_type.value,
+                            "content": block.content,
+                            "confidence": block.confidence,
+                            "bbox": list(block.bbox),
+                        }
+                        for block in page.layout
+                    ]
+                    if page.layout
+                    else None,
+                    confidence=page.confidence,
+                )
+            )
+
+        document = await self.db_session.get(Document, document_id)
+        if document is not None:
+            document.page_count = len(pages)
+            document.status = "extracting"
+        await self.db_session.flush()
 
     async def _do_ocr(self, job: IngestionJob):
         pages: list[PageResult] = self._get(job.job_id, "pages") or []
@@ -169,33 +216,7 @@ class IngestionPipeline:
         chunks: list[Chunk] = self.chunker.chunk_document(job.document_id, structured)
         self._set(job.job_id, "chunks", chunks)
 
-        # 写入 knowledge_chunks 表（B 持久化补丁 — PR41）
-        from apps.api.db.session import _get_sessionmaker as _gsm
-        from apps.api.db.models.knowledge_chunk import KnowledgeChunk
-        async with _gsm()() as db:
-            # 幂等：重新导入同一文档时先清理旧数据
-            from sqlalchemy import delete as sa_delete
-            await db.execute(sa_delete(KnowledgeChunk).where(
-                KnowledgeChunk.document_id == job.document_id,
-            ))
-            for c in chunks:
-                db.add(KnowledgeChunk(
-                    id=c.chunk_id,
-                    document_id=c.document_id,
-                    page_from=c.page_from,
-                    page_to=c.page_to,
-                    question_no=getattr(c, "question_no", None),
-                    section_path=" > ".join(c.section_path) if c.section_path else None,
-                    content=c.content,
-                    private_content=getattr(c, "private_content", None),
-                    content_hash=c.content_hash,
-                    visibility=c.visibility.value if hasattr(c.visibility, "value") else str(c.visibility),
-                    material_type=c.material_type.value if hasattr(c.material_type, "value") else str(c.material_type),
-                    year=getattr(c, "year", None),
-                    image_refs=getattr(c, "image_refs", None),
-                    embedding_version=str(cv) if (cv := getattr(c, "content_version", None)) is not None else None,
-                ))
-            await db.commit()
+        await self._persist_chunks(job.document_id, chunks)
 
         await self.job_mgr.update_progress(
             job.job_id, IngestionStage.VECTORIZING,
@@ -203,6 +224,67 @@ class IngestionPipeline:
             error=f"切块: {len(chunks)} 块"
         )
         job.stage = IngestionStage.VECTORIZING
+
+    async def _persist_chunks(
+        self,
+        document_id: str,
+        chunks: list[Chunk],
+    ) -> None:
+        """在生产数据库会话可用时幂等写入知识块。"""
+        if self.db_session is None:
+            return
+
+        from sqlalchemy import delete as sa_delete
+
+        from apps.api.db.models.knowledge_chunk import KnowledgeChunk
+
+        await self.db_session.execute(
+            sa_delete(KnowledgeChunk).where(
+                KnowledgeChunk.document_id == document_id,
+            )
+        )
+        for chunk in chunks:
+            visibility = (
+                chunk.visibility.value
+                if hasattr(chunk.visibility, "value")
+                else str(chunk.visibility)
+            )
+            material_type = (
+                chunk.material_type.value
+                if hasattr(chunk.material_type, "value")
+                else str(chunk.material_type)
+            )
+            content_version = getattr(chunk, "content_version", None)
+            content_hash = getattr(chunk, "content_hash", None) or hashlib.sha256(
+                chunk.content.encode("utf-8")
+            ).hexdigest()
+            self.db_session.add(
+                KnowledgeChunk(
+                    id=chunk.chunk_id,
+                    document_id=chunk.document_id,
+                    page_from=chunk.page_from,
+                    page_to=chunk.page_to,
+                    question_no=getattr(chunk, "question_no", None),
+                    section_path=(
+                        " > ".join(chunk.section_path)
+                        if chunk.section_path
+                        else None
+                    ),
+                    content=chunk.content,
+                    private_content=getattr(chunk, "private_content", None),
+                    content_hash=content_hash,
+                    visibility=visibility,
+                    material_type=material_type,
+                    year=getattr(chunk, "year", None),
+                    image_refs=getattr(chunk, "image_refs", None),
+                    embedding_version=(
+                        str(content_version)
+                        if content_version is not None
+                        else None
+                    ),
+                )
+            )
+        await self.db_session.flush()
 
     async def _do_vectorize(self, job: IngestionJob):
         chunks: list[Chunk] = self._get(job.job_id, "chunks") or []
@@ -262,9 +344,17 @@ class IngestionHandler:
     """
 
     async def handle(self, task):
-        from apps.worker.pipeline import WorkerResult
         from sqlalchemy import select
-        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from apps.api.db.models.document import Document as ApiDocument
+        from apps.api.db.session import _get_sessionmaker
+        from apps.worker.pipeline import WorkerResult
+        from apps.worker.schemas import (
+            IngestionJob as BIngestionJob,
+        )
+        from apps.worker.schemas import (
+            IngestionStage,
+        )
 
         document_id = task.payload.get("document_id", "") if task.payload else ""
         if not document_id:
@@ -275,10 +365,6 @@ class IngestionHandler:
             )
 
         # 从数据库查询文件路径
-        from apps.api.db.session import _get_sessionmaker
-        from apps.api.db.models.document import Document as ApiDocument
-        from apps.worker.ingestion.job_manager import JobManager
-
         file_path = None
         async with _get_sessionmaker()() as db_session:
             result = await db_session.execute(
@@ -298,32 +384,24 @@ class IngestionHandler:
         # 驱动入库管线（循环推进全部阶段直到完成）
         async with _get_sessionmaker()() as db_session:
             job_mgr = JobManager(db_session)
-            pipeline = IngestionPipeline(job_manager=job_mgr)
-            pipeline._set(task.task_id, "file_path", file_path)
+            pipeline = IngestionPipeline(
+                job_manager=job_mgr,
+                db_session=db_session,
+            )
 
-            from apps.worker.schemas import IngestionJob as BIngestionJob, IngestionStage
             b_job = BIngestionJob(
                 job_id=task.task_id, document_id=document_id,
                 stage=IngestionStage.EXTRACTING,
             )
-            # 循环推进 8 个阶段直到 COMPLETING
-            for _ in range(8):
-                previous = b_job.stage
-                try:
-                    await pipeline.run(b_job)
-                except Exception:
-                    return WorkerResult(
-                        task_id=task.task_id, success=False,
-                        error_code="PIPELINE_FAILED",
-                        error_message=f"阶段 {b_job.stage.value} 失败",
-                    )
-                if b_job.stage == IngestionStage.COMPLETING:
-                    break
-                if b_job.stage == previous:
-                    return WorkerResult(
-                        task_id=task.task_id, success=False,
-                        error_code="STAGE_STUCK",
-                        error_message=f"阶段未推进: {b_job.stage.value}",
-                    )
+            try:
+                await pipeline.run_to_completion(b_job, file_path)
+                await db_session.commit()
+            except Exception:
+                await db_session.rollback()
+                return WorkerResult(
+                    task_id=task.task_id, success=False,
+                    error_code="PIPELINE_FAILED",
+                    error_message=f"阶段 {b_job.stage.value} 失败",
+                )
 
         return WorkerResult(task_id=task.task_id, success=True, output={})

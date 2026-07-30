@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from copy import deepcopy
 from typing import Any
 
 
@@ -61,8 +62,9 @@ class DemoCache:
     ) -> Any | None:
         """查询缓存。命中时返回公开 DTO 并附加 _demo=True 标记。未命中返回 None。"""
         key = self._make_key(agent, prompt_version, messages, filters)
-        value = self._store.get(key)
-        if value is not None:
+        stored = self._store.get(key)
+        value = deepcopy(stored)
+        if isinstance(value, dict):
             value["_demo"] = True
         return value
 
@@ -75,14 +77,49 @@ class DemoCache:
         filters: dict | None = None,
     ) -> None:
         """写入缓存。拒绝含私有字段的内容。"""
-        if isinstance(value, dict):
-            forbidden = {"expected_answer", "rubric", "private_answer",
-                         "grade_private", "step_scores", "prompt", "api_key"}
-            for k in forbidden:
-                if k in value:
-                    raise ValueError(f"缓存拒绝含私有字段: {k}")
+        forbidden = {
+            "api_key",
+            "expected_answer",
+            "grade_private",
+            "private",
+            "private_answer",
+            "private_content",
+            "prompt",
+            "rubric",
+            "step_scores",
+        }
+        private_field = self._find_forbidden_field(value, forbidden)
+        if private_field is not None:
+            raise ValueError(f"缓存拒绝含私有字段: {private_field}")
         key = self._make_key(agent, prompt_version, messages, filters)
-        self._store[key] = value
+        self._store[key] = deepcopy(value)
+
+    @staticmethod
+    def _find_forbidden_field(
+        value: Any,
+        forbidden: set[str],
+    ) -> str | None:
+        """递归扫描 JSON/Pydantic 数据，阻止嵌套私有字段绕过顶层校验。"""
+        pending = [value]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            object_id = id(current)
+            if object_id in seen:
+                continue
+            seen.add(object_id)
+
+            if hasattr(current, "model_dump"):
+                current = current.model_dump()
+            if isinstance(current, dict):
+                for key, child in current.items():
+                    normalized = str(key).lower()
+                    if normalized in forbidden:
+                        return normalized
+                    pending.append(child)
+            elif isinstance(current, list | tuple | set):
+                pending.extend(current)
+        return None
 
     def clear(self) -> None:
         """清空缓存。"""

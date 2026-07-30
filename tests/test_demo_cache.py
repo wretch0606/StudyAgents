@@ -60,6 +60,36 @@ def test_demo_cache_rejects_private_fields() -> None:
         cache.set("evaluator", "v1", [], {"step_scores": [...]})
 
 
+def test_demo_cache_rejects_nested_private_fields() -> None:
+    """私有答案位于嵌套对象或列表时同样拒绝缓存。"""
+    from apps.api.services.demo_cache import DemoCache
+
+    cache = DemoCache()
+    with pytest.raises(ValueError, match="private"):
+        cache.set(
+            "questioner",
+            "v1",
+            [],
+            {"items": [{"private": {"expected_answer": "42"}}]},
+        )
+
+
+def test_demo_cache_get_does_not_mutate_stored_value() -> None:
+    """读取时添加的演示标记不会污染缓存中的原始 DTO。"""
+    from apps.api.services.demo_cache import DemoCache
+
+    cache = DemoCache()
+    messages = [{"role": "user", "content": "A"}]
+    cache.set("knowledge", "v1", messages, {"answer": "B"})
+
+    first = cache.get("knowledge", "v1", messages)
+    first["answer"] = "changed"
+    second = cache.get("knowledge", "v1", messages)
+
+    assert second["answer"] == "B"
+    assert second["_demo"] is True
+
+
 def test_demo_cache_size() -> None:
     """size 属性正确。"""
     from apps.api.services.demo_cache import DemoCache

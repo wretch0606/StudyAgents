@@ -7,7 +7,7 @@ LangGraph 固定状态图，对应开发文档 6.3 节（图 4）。
   START → coordinator → knowledge → [sufficient?]
                           │             ├─ yes → evaluator_qa → END
                           │             └─ no  → refusal → END
-                          └─ (error) → error_handler → END
+                          └─ (error) → error → END
 
 依赖（D / B 提供）:
   - ModelGateway:     from apps.api.services.model_gateway
@@ -203,7 +203,7 @@ async def coordinator_node(
             intent="qa_ask",
             normalized_query=user_input.strip(),
             filters=state.get("filters", {}),
-            next_node="knowledge_agent",
+            next_node="knowledge",
             public_summary="协调 Agent 识别为自由问答模式，路由至知识 Agent",
         )
     else:
@@ -507,7 +507,7 @@ async def error_node(
 
 def _error_return(state: AgentState, code: str, message: str, retryable: bool) -> dict:
     return {
-        "next_node": "error_handler",
+        "next_node": "error",
         "error": {
             "code": code,
             "message": message,
@@ -535,8 +535,15 @@ async def _emit(
         return  # D 的代码尚未合入，静默跳过
 
     # 将内部 TypedDict SourceRef 映射为 Pydantic SourceRef（去除不被 schema 接受的字段）
-    _ALLOWED_REF_KEYS = {"document_id", "document_name", "page_no", "question_no",
-                         "chunk_id", "excerpt", "page_image_url"}
+    allowed_ref_keys = {
+        "chunk_id",
+        "document_id",
+        "document_name",
+        "excerpt",
+        "page_image_url",
+        "page_no",
+        "question_no",
+    }
     mapped_refs = []
     for ref in (source_refs or []):
         if isinstance(ref, dict):
@@ -544,7 +551,7 @@ async def _emit(
             for k, v in ref.items():
                 if k == "page_number":
                     mapped["page_no"] = v
-                elif k in _ALLOWED_REF_KEYS:
+                elif k in allowed_ref_keys:
                     mapped[k] = v
             if "page_no" not in mapped and "page_number" not in ref:
                 pass  # keep as-is if no page field
@@ -552,7 +559,7 @@ async def _emit(
         else:
             # dataclass or object: filter allowed attributes
             mapped = {}
-            for k in _ALLOWED_REF_KEYS:
+            for k in allowed_ref_keys:
                 if hasattr(ref, k):
                     mapped[k] = getattr(ref, k)
             if hasattr(ref, "page_number") and "page_no" not in mapped:
@@ -616,30 +623,30 @@ def build_qa_graph():
     builder = StateGraph(AgentState)
 
     builder.add_node("coordinator", coordinator_node)
-    builder.add_node("knowledge_agent", knowledge_node)
+    builder.add_node("knowledge", knowledge_node)
     builder.add_node("evaluator_qa", evaluator_qa_node)
     builder.add_node("refusal", refusal_node)
-    builder.add_node("error_handler", error_node)
+    builder.add_node("error", error_node)
 
     builder.set_entry_point("coordinator")
 
     builder.add_conditional_edges("coordinator", _route, {
-        "knowledge_agent": "knowledge_agent",
+        "knowledge": "knowledge",
         "refusal": "refusal",
-        "error_handler": "error_handler",
+        "error": "error",
     })
-    builder.add_conditional_edges("knowledge_agent", _route, {
+    builder.add_conditional_edges("knowledge", _route, {
         "evaluator_qa": "evaluator_qa",
         "refusal": "refusal",
-        "error_handler": "error_handler",
+        "error": "error",
     })
 
     builder.add_edge("evaluator_qa", END)
     builder.add_edge("refusal", END)
-    builder.add_edge("error_handler", END)
+    builder.add_edge("error", END)
 
     return builder
 
 
 def _route(state: AgentState) -> str:
-    return state.get("next_node", "error_handler")
+    return state.get("next_node", "error")
