@@ -14,7 +14,6 @@ import { useChatStore } from '../stores/useChatStore'
 import { useWrongBookStore } from '../stores/useWrongBookStore'
 import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
-import { ElMessage } from 'element-plus'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
 import { renderMixedHtml } from '../utils/katex-renderer'
@@ -469,13 +468,15 @@ async function handleSend() {
   // 3. 清空输入框（附件在请求发送成功后再清除）
   inputText.value = ''
 
-  // 4. 构造发送文本（附件文件名嵌入 user_input 作为文本引用）
+  // 4. 构造发送文本（附件内容以 base64 data URL 内联到 user_input）
   //    后端 POST /api/documents 仅限 admin，StartQaRequest 无 file_ids 字段，
-  //    因此附件以 [附件: name.pdf] 文本形式传递，避免 403 和字段被忽略。
+  //    因此文件内容直接嵌入消息文本中传递。
   let fullInput = text
   if (currentAttachments && currentAttachments.length > 0) {
-    const fileNames = currentAttachments.map((a) => a.fileName).join('、')
-    fullInput = `[附件: ${fileNames}]\n\n${text}`
+    const fileRefs = currentAttachments
+      .map((a) => `[文件: ${a.fileName}]\n${a.dataUrl}`)
+      .join('\n\n')
+    fullInput = `${fileRefs}\n\n---\n\n${text}`
   }
   await chatStore.startQa(fullInput)
 
@@ -497,8 +498,8 @@ function scrollToBottom() {
 // 问答附件引用（📎 回形针按钮）
 //
 // 注意：后端 POST /api/documents 仅限 admin，普通成员无法上传文件。
-// 附件以文件名引用形式暂存，发送时作为文本嵌入 user_input
-//（如 "[附件: report.pdf]\n\n问题"），避免 403 和字段被忽略。
+// 附件通过 FileReader 读取为 base64 data URL 后暂存，
+// 发送时作为 [文件: name.pdf] + data URL 内联到 user_input 中。
 // =========================================================
 const chatFileInputRef = ref<HTMLInputElement | null>(null)
 
@@ -508,11 +509,13 @@ function triggerChatUpload() {
 }
 
 /**
- * 文件选择后 → 暂存文件元数据到 Store，不调用上传 API。
+ * 文件选择后 → 读取文件内容并暂存到 Store。
+ *
+ * 通过 FileReader 将文件内容读取为 base64 data URL，
+ * 发送时内联到 user_input 中传递给后端。
  *
  * 注意：后端 POST /api/documents 仅限 admin，普通成员上传会返回 403。
- * 附件改为在 handleSend 中将文件名作为文本引用嵌入 user_input
- *（如 "[附件: report.pdf]\n\n问题"），文件名远小于 10000 字符限制。
+ * 文件以 data URL 形式嵌入 user_input，大文件可能触发 10000 字符限制。
  */
 async function handleChatFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -521,11 +524,21 @@ async function handleChatFileChange(e: Event) {
 
   const localId = `att-${Date.now()}`
 
-  // 仅暂存文件元数据，不发起网络请求
+  // 使用 FileReader 读取文件内容为 base64 data URL
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error('文件读取失败'))
+    reader.readAsDataURL(file)
+  })
+
+  // 暂存文件元数据 + 实际内容
   chatStore.addAttachment({
     localId,
     fileName: file.name,
     fileSize: file.size,
+    mimeType: file.type,
+    dataUrl,
   })
 
   // 重置 input 以便重复选择同一文件
@@ -1163,7 +1176,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           @change="handleChatFileChange"
         />
 
-        <!-- 附件卡片区（文件名引用，发送时嵌入 user_input 文本） -->
+        <!-- 附件卡片区（文件内容已通过 FileReader 读取，发送时内联到 user_input） -->
         <div v-if="attachments.length > 0" class="attachment-cards">
           <div
             v-for="att in attachments"
