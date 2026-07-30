@@ -1,37 +1,41 @@
 // ============================================================
-// StudyAgents — 文件上传 API（双轨制）
+// StudyAgents — 文件上传 API
 //
 // 双轨制说明：
 //   - uploadKnowledgeBase(file)：管理员资料库上传
-//     → POST /api/documents (multipart/form-data)
-//   - uploadChatAttachment(file)：问答附件上传
-//     → POST /api/documents (multipart/form-data)
+//     → POST /api/documents (multipart/form-data) — 仅 admin
+//   - uploadChatAttachment(file)：问答附件（客户端处理）
+//     → 将文件读取为 base64 Data URL，不经过服务端上传
+//     → 附件信息随 QA 消息的 user_input 文本一起发送
 //
-// 两个链路职责严格分离：
-//   - 管理员上传 → 资料解析、切片、向量化、入库（长期存储）
-//   - 问答附件 → 临时上传、仅关联当前对话消息（暂存）
+// 注意：后端目前仅有管理员专用上传端点，
+// 普通用户聊天附件通过客户端内联处理（Data URL）。
 // ============================================================
-
-import http from '../utils/request'
 
 // ============================================================
 // 上传响应类型
 // ============================================================
 
-/** POST /api/documents 响应 */
+/** POST /api/documents 响应（仅管理员） */
 export interface KnowledgeUploadResponse {
-  /** 资料文件唯一 ID */
-  file_id: string
-  /** 处理状态（异步任务） */
-  status: 'processing'
+  /** 文档 ID */
+  id: string
+  /** 文档名称 */
+  name: string
+  /** 处理状态 */
+  status: string
+  /** 文件大小（字节） */
+  size_bytes: number
 }
 
-/** POST /api/chat/upload 响应 */
+/** 聊天附件上传响应（客户端处理，无服务端上传） */
 export interface ChatUploadResponse {
-  /** 附件临时 URL */
+  /** 文件 Data URL（客户端本地生成） */
   file_url: string
-  /** 附件原始文件名 */
+  /** 原始文件名 */
   file_name: string
+  /** 文件大小（字节） */
+  file_size: number
 }
 
 // ============================================================
@@ -40,9 +44,10 @@ export interface ChatUploadResponse {
 
 /**
  * 管理员资料库上传：将文件提交到后端进行解析入库。
+ * 需要 admin 权限，普通用户调用会返回 403。
  *
  * @param file 要上传的文件对象
- * @returns 包含 file_id 与处理状态的响应
+ * @returns 包含 id 与处理状态的响应
  */
 export async function uploadKnowledgeBase(
   file: File,
@@ -50,40 +55,47 @@ export async function uploadKnowledgeBase(
   const formData = new FormData()
   formData.append('file', file)
 
-  const response = await http.post<KnowledgeUploadResponse>(
-    '/documents',
-    formData,
-    {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+  const csrfToken = localStorage.getItem('authToken') || ''
+  const resp = await fetch('/api/documents', {
+    method: 'POST',
+    headers: {
+      'X-CSRF-Token': csrfToken,
     },
-  )
+    body: formData,
+    credentials: 'include',
+  })
 
-  return response.data
+  if (!resp.ok) {
+    throw new Error(`上传失败: HTTP ${resp.status}`)
+  }
+
+  return resp.json()
 }
 
 /**
- * 问答附件上传：在聊天过程中临时上传文件（如截图、参考文档）。
+ * 问答附件处理：将文件读取为客户端 Data URL（不经过服务端上传）。
  *
- * @param file 要上传的文件对象
- * @returns 包含 file_url 与 file_name 的响应
+ * 后端目前仅有管理员上传端点，普通用户附件通过 base64 Data URL
+ * 嵌入到 QA 消息文本中发送，避免 403 鉴权错误。
+ *
+ * @param file 要处理的文件对象
+ * @returns 包含 data URL、文件名和大小的响应
  */
 export async function uploadChatAttachment(
   file: File,
 ): Promise<ChatUploadResponse> {
-  const formData = new FormData()
-  formData.append('file', file)
-
-  const response = await http.post<ChatUploadResponse>(
-    '/documents',
-    formData,
-    {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    },
-  )
-
-  return response.data
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      resolve({
+        file_url: reader.result as string,
+        file_name: file.name,
+        file_size: file.size,
+      })
+    }
+    reader.onerror = () => {
+      reject(new Error(`文件读取失败: ${file.name}`))
+    }
+    reader.readAsDataURL(file)
+  })
 }

@@ -69,11 +69,15 @@ export interface AgentTrace {
   durationMs?: number
 }
 
-/** 文档溯源引用（SourceRef） */
+/** 文档溯源引用（SourceRef）— 对齐后端 SourceRef 契约 */
 export interface SourceRefDisplay {
-  refId: string
-  documentName: string
-  pageNumber: number
+  /** 后端返回 document_id，前端统一用此字段 */
+  document_id: string
+  /** 文档名称 */
+  document_name: string
+  /** 页码 */
+  page_no: number
+  /** 引用摘要 */
   excerpt: string
 }
 
@@ -116,22 +120,34 @@ export interface PracticeSubmitResult {
   event_url: string
 }
 
-/** 训练总结（来自 GET /api/practice/sessions/{id}/summary） */
+/** 训练总结（来自 GET /api/practice/sessions/{id}/summary）
+ *  对齐后端 SessionSummary 契约 */
 export interface PracticeSummary {
   session_id: string
-  grade_info: {
+  total_score: number
+  total_max_score: number
+  /** 后端字段名：grades（非 grade_info） */
+  grades: Array<{
+    id: string
+    answer_id: string
     score: number
     max_score: number
     confidence: number
+    review_required: boolean
     explanation: string | null
     source_refs: SourceRefDisplay[]
-  } | null
-  knowledge_points: Array<{
+    status: string
+    created_at: string | null
+  }>
+  /** 后端字段名：knowledge_point_performance（非 knowledge_points） */
+  knowledge_point_performance: Array<{
     knowledge_point_id: string
     knowledge_point_name: string
     mastery: number
     mastery_change: number
   }>
+  wrong_book_entry_ids: string[]
+  suggestion: string | null
 }
 
 // ============================================================
@@ -150,6 +166,49 @@ const AGENT_DEFAULT_SUMMARIES: Record<string, string> = {
   knowledge: '等待检索请求…',
   questioner: '等待出题请求…',
   evaluator: '等待评测请求…',
+}
+
+// ============================================================
+// 训练参数映射
+// ============================================================
+
+/** 前端题型 → 后端 question_types */
+const QUESTION_TYPE_MAP: Record<string, string> = {
+  single: 'choice',
+  multiple: 'choice',
+  essay: 'short_answer',
+  choice: 'choice',
+  fill_blank: 'fill_blank',
+  calculation: 'calculation',
+  short_answer: 'short_answer',
+}
+
+/** 前端难度 → 后端 difficulty (1/2/3) */
+const DIFFICULTY_MAP: Record<string, number> = {
+  easy: 1,
+  medium: 2,
+  hard: 3,
+}
+
+/** 将前端训练参数映射为后端契约格式 */
+function mapTrainingParams(params: {
+  chapterIds: string[]
+  questionTypes: string[]
+  difficulty: string
+  count: number
+}) {
+  const mappedTypes = params.questionTypes
+    .map((t) => QUESTION_TYPE_MAP[t] || t)
+    .filter((t, i, arr) => arr.indexOf(t) === i) // 去重
+
+  const mappedDifficulty = DIFFICULTY_MAP[params.difficulty] ?? 2
+
+  return {
+    chapter_ids: params.chapterIds,
+    question_types: mappedTypes.length > 0 ? mappedTypes : ['short_answer'],
+    difficulty: mappedDifficulty,
+    target_count: params.count,
+  }
 }
 
 // ============================================================
@@ -212,9 +271,9 @@ export const useChatStore = defineStore('chat', () => {
     messages.value.length > 0 ? messages.value[messages.value.length - 1] : null,
   )
 
-  /** 根据 refId 查找引用详情 */
-  function getRefById(refId: string): SourceRefDisplay | undefined {
-    return sourceRefs.value.find((r) => r.refId === refId)
+  /** 根据 document_id 查找引用详情 */
+  function getRefById(documentId: string): SourceRefDisplay | undefined {
+    return sourceRefs.value.find((r) => r.document_id === documentId)
   }
 
   // ==========================================================
@@ -361,9 +420,21 @@ export const useChatStore = defineStore('chat', () => {
    *
    * @param userInput 用户输入文本
    */
-  async function startQa(userInput: string): Promise<void> {
+  async function startQa(userInput: string, attachments?: ChatAttachment[]): Promise<void> {
     // 断开上一轮 SSE（如果有）
     disconnectSSE()
+
+    // 拼接附件信息到 user_input（后端 QA 端点不接收独立的 attachments 字段）
+    let fullInput = userInput
+    if (attachments && attachments.length > 0) {
+      const doneAtts = attachments.filter((a) => a.uploadStatus === 'done')
+      if (doneAtts.length > 0) {
+        const attInfo = doneAtts
+          .map((a) => `[附件: ${a.fileName} (${a.fileSize} bytes)]`)
+          .join('\n')
+        fullInput = `${attInfo}\n\n${userInput}`
+      }
+    }
 
     // 初始化 Agent 轨迹
     clearAgentTraces()
@@ -422,7 +493,7 @@ export const useChatStore = defineStore('chat', () => {
       const qaResp = await fetch(`/api/sessions/${currentSessionId.value}/qa`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-        body: JSON.stringify({ user_input: userInput, mode: 'qa' }),
+        body: JSON.stringify({ user_input: fullInput, mode: 'qa' }),
       })
       if (!qaResp.ok) {
         throw new Error(`QA 启动失败: HTTP ${qaResp.status}`)
@@ -447,40 +518,45 @@ export const useChatStore = defineStore('chat', () => {
       activeEventSource = eventSource
 
       eventSource.onmessage = (event) => {
+        // 处理无事件名的默认消息块（SSE data-only 消息）
+        // 后端可能通过 message/chunk 事件或纯 data 行发送流式文本
+        const rawData = event.data
+
         try {
-          const evt: SseEvent = JSON.parse(event.data)
+          const evt: SseEvent = JSON.parse(rawData)
 
           // 更新 Agent 轨迹
           updateAgentTraceFromSSE(evt)
 
-          // token 事件 → 追加流式文本
-          if (evt.event_type === 'token' && evt.summary) {
+          // 流式文本：event_type 为 message / chunk / token，或 summary 非空且非纯状态描述
+          const isContentEvent =
+            evt.event_type === 'message' ||
+            evt.event_type === 'chunk' ||
+            evt.event_type === 'token' ||
+            (!!evt.summary && !isStatusOnlySummary(evt.summary))
+
+          if (isContentEvent && evt.summary) {
             appendStreamChunk(evt.summary)
           }
 
           // source_refs 更新
           if (evt.source_refs && evt.source_refs.length > 0) {
-            sourceRefs.value = evt.source_refs
+            sourceRefs.value = evt.source_refs.map(mapSourceRef)
           }
 
           // 终止事件
           if (evt.event_type === 'run.completed' || evt.event_type === 'run.failed') {
-            // 归档 agentSteps
-            agentSteps.value = currentAgentTraces.value.map((t) => ({
-              agentRole: t.agentRole,
-              agentLabel: t.agentLabel,
-              status: t.status as 'idle' | 'running' | 'succeeded' | 'failed',
-              summary: t.summary,
-              detail: t.action,
-              durationMs: t.durationMs,
-            }))
+            archiveAgentSteps()
             finishStream()
             eventSource.close()
             activeEventSource = null
             resolve()
           }
         } catch {
-          // 非 JSON 消息（如心跳注释），忽略
+          // 非 JSON 消息 — 可能是纯文本流式块（SSE data-only）
+          if (rawData && rawData.trim()) {
+            appendStreamChunk(rawData)
+          }
         }
       }
 
@@ -513,6 +589,44 @@ export const useChatStore = defineStore('chat', () => {
       trace.durationMs = evt.duration_ms
     }
     currentAgentTraces.value = [...traces]
+  }
+
+  /** 判断 summary 是否仅为 Agent 状态描述（非内容文本） */
+  function isStatusOnlySummary(summary: string): boolean {
+    const statusPatterns = [
+      /^正在/,
+      /^等待/,
+      /^意图解析/,
+      /^检索完成/,
+      /^验证/,
+      /^评测完成/,
+      /^题目生成/,
+      /^待命/,
+      /^当前为/,
+    ]
+    return statusPatterns.some((p) => p.test(summary))
+  }
+
+  /** 将后端 SourceRef 映射为前端 SourceRefDisplay */
+  function mapSourceRef(raw: Record<string, unknown>): SourceRefDisplay {
+    return {
+      document_id: (raw.document_id as string) || (raw.refId as string) || '',
+      document_name: (raw.document_name as string) || (raw.documentName as string) || '',
+      page_no: (raw.page_no as number) ?? (raw.pageNumber as number) ?? 0,
+      excerpt: (raw.excerpt as string) || '',
+    }
+  }
+
+  /** 将 currentAgentTraces 归档到 agentSteps */
+  function archiveAgentSteps(): void {
+    agentSteps.value = currentAgentTraces.value.map((t) => ({
+      agentRole: t.agentRole,
+      agentLabel: t.agentLabel,
+      status: t.status as 'idle' | 'running' | 'succeeded' | 'failed',
+      summary: t.summary,
+      detail: t.action,
+      durationMs: t.durationMs,
+    }))
   }
 
   /**
@@ -609,15 +723,11 @@ export const useChatStore = defineStore('chat', () => {
     clearAgentTraces()
 
     try {
+      const body = mapTrainingParams(params)
       const resp = await fetch('/api/practice/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-        body: JSON.stringify({
-          chapter_ids: params.chapterIds,
-          question_types: params.questionTypes,
-          difficulty: params.difficulty,
-          target_count: params.count,
-        }),
+        body: JSON.stringify(body),
       })
       if (!resp.ok) {
         throw new Error(`创建训练失败: HTTP ${resp.status}`)
@@ -628,9 +738,9 @@ export const useChatStore = defineStore('chat', () => {
       currentPracticeItemId.value = data.session?.current_item?.item_id ?? null
       currentPracticeQuestionVersion.value = data.session?.current_item?.question_version ?? '1.0'
 
-      // 从训练会话中提取题目信息
+      // 从训练会话中提取题目信息（后端字段：stem）
       const currentItem = data.session?.current_item
-      const questionText = currentItem?.question?.text ?? currentItem?.question?.content ?? ''
+      const questionText = currentItem?.stem ?? ''
 
       return {
         sessionId: data.session?.id ?? '',
@@ -719,42 +829,34 @@ export const useChatStore = defineStore('chat', () => {
       }
       const summary: PracticeSummary = await summaryResp.json()
 
-      // 4. 整理返回到视图层
-      const gradeInfo = summary.grade_info
-      if (gradeInfo) {
+      // 4. 整理返回到视图层（后端字段：grades 数组 + knowledge_point_performance）
+      const firstGrade = summary.grades?.[0]
+      if (firstGrade) {
         // 更新 sourceRefs
-        if (gradeInfo.source_refs && gradeInfo.source_refs.length > 0) {
-          sourceRefs.value = gradeInfo.source_refs
+        if (firstGrade.source_refs && firstGrade.source_refs.length > 0) {
+          sourceRefs.value = firstGrade.source_refs
         }
 
         // 标记 Evaluator 完成
         if (evaluator) {
           evaluator.status = 'succeeded'
-          evaluator.summary = `评测完成：得分 ${gradeInfo.score}/${gradeInfo.max_score}`
+          evaluator.summary = `评测完成：得分 ${firstGrade.score}/${firstGrade.max_score}`
           evaluator.action = evaluator.summary
           currentAgentTraces.value = [...currentAgentTraces.value]
         }
 
-        // 归档 agentSteps
-        agentSteps.value = currentAgentTraces.value.map((t) => ({
-          agentRole: t.agentRole,
-          agentLabel: t.agentLabel,
-          status: t.status as 'idle' | 'running' | 'succeeded' | 'failed',
-          summary: t.summary,
-          detail: t.action,
-          durationMs: t.durationMs,
-        }))
+        archiveAgentSteps()
 
         return {
-          score: gradeInfo.score,
-          total: gradeInfo.max_score,
-          analysis: gradeInfo.explanation ?? '',
-          highlights: summary.knowledge_points.map(
+          score: firstGrade.score,
+          total: firstGrade.max_score,
+          analysis: firstGrade.explanation ?? summary.suggestion ?? '',
+          highlights: (summary.knowledge_point_performance ?? []).map(
             (kp) =>
               `${kp.mastery_change >= 0 ? '✅' : '⚠️'} ${kp.knowledge_point_name}: ${Math.round(kp.mastery * 100)}%`,
           ),
-          confidence: gradeInfo.confidence,
-          sourceRefs: gradeInfo.source_refs ?? [],
+          confidence: firstGrade.confidence,
+          sourceRefs: sourceRefs.value,
         }
       }
 

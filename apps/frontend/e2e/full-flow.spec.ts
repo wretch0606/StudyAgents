@@ -121,6 +121,15 @@ test.describe('全链路自动化：登录 → 问答 → 训练 → 错题本',
     const newMessageCount = await page.locator('.messages-inner .message-row').count()
     expect(newMessageCount).toBeGreaterThanOrEqual(messageCount + 1)
 
+    // 断言 AI 助手回复气泡已渲染（非空内容）
+    const assistantBubbles = page.locator('.bubble.assistant, .message-row.assistant')
+    const assistantCount = await assistantBubbles.count()
+    expect(assistantCount).toBeGreaterThanOrEqual(1)
+    // 助手气泡内容不应为空
+    const lastAssistantContent = await assistantBubbles.last().textContent()
+    expect(lastAssistantContent).toBeTruthy()
+    expect(lastAssistantContent!.trim().length).toBeGreaterThan(0)
+
     // ==========================================================
     // Phase 4: PDF 文档导入按钮
     // ==========================================================

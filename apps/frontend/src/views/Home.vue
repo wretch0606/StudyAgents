@@ -217,10 +217,18 @@ function applyMasteryDegradation(chapter: string, score: number, total: number) 
   overallMastery.value = Math.round((sum / masteryRecords.value.length) * 100) / 100
 }
 
-/** 当前题目题干（纯文本，用于错题本存储） */
+/** 当前题目题干（纯文本，用于错题本存储）
+ *  从模板 .pqc-prompt 的 DOM 文本内容获取真实后端题目 */
 const currentQuestionText = computed(() => {
-  // 与模板中 .pqc-prompt 内容保持同步（去除 HTML 标签后的纯文本）
-  return '请简述 TCP 拥塞控制中慢启动与拥塞避免两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。'
+  // 优先使用后端返回的 stem（已在 createPracticeSession 中存储）
+  // 回退到 DOM 内容
+  if (typeof document !== 'undefined') {
+    const promptEl = document.querySelector('.pqc-prompt')
+    if (promptEl) {
+      return (promptEl.textContent || '').replace(/<[^>]+>/g, '').trim()
+    }
+  }
+  return ''
 })
 
 /** 提交答案 → 触发 Evaluator 评测 + 低分自动沉淀至错题本 */
@@ -230,6 +238,10 @@ async function submitAnswer() {
 
   try {
     const report = await chatStore.submitPracticeAnswer(trainingAnswer.value)
+    if (!report) {
+      // submitPracticeAnswer 返回 null 表示提交失败（已在 Store 内提示错误）
+      return
+    }
     evaluationReport.value = report
     isSubmitted.value = true
 
@@ -381,10 +393,12 @@ async function loadMasteryData() {
     const resp = await fetch('/api/learning-summary')
     if (!resp.ok) return
     const data = await resp.json()
-    if (data.knowledge_points) {
-      masteryRecords.value = data.knowledge_points.map((kp: { knowledge_point_id: string; knowledge_point_name: string; mastery: number }) => ({
+    // 后端 LearningSummary 字段为 mastery_records（非 knowledge_points）
+    const records = data.mastery_records ?? data.knowledge_points
+    if (records) {
+      masteryRecords.value = records.map((kp: { knowledge_point_id: string; knowledge_point_name?: string; mastery: number }) => ({
         kpId: kp.knowledge_point_id,
-        kpName: kp.knowledge_point_name,
+        kpName: kp.knowledge_point_name || kp.knowledge_point_id,
         mastery: kp.mastery,
       }))
     }
@@ -420,7 +434,7 @@ const chapterLabelMap: Record<string, string> = {
 }
 
 // =========================================================
-// 用户输入 & 发送（已接入 SSE 流式打字机模拟）
+// 用户输入 & 发送（真实后端 SSE 流式问答）
 // =========================================================
 const inputText = ref('')
 const chatContainerRef = ref<InstanceType<typeof import('element-plus').ElScrollbar> | null>(null)
@@ -442,8 +456,8 @@ async function handleSend() {
   inputText.value = ''
   chatStore.clearAttachments()
 
-  // 3. 调用真实后端 SSE 流式问答
-  await chatStore.startQa(text)
+  // 3. 调用真实后端 SSE 流式问答（含附件信息）
+  await chatStore.startQa(text, attachments.value.length > 0 ? [...attachments.value] : undefined)
 
   await nextTick()
   scrollToBottom()
@@ -1021,13 +1035,13 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                 <div class="pqc-source-grid">
                   <div
                     v-for="ref in evaluationReport.sourceRefs"
-                    :key="ref.refId"
+                    :key="ref.document_id"
                     class="pqc-source-card"
                   >
                     <div class="pqc-source-head">
-                      <span class="pqc-source-badge">[{{ ref.refId }}]</span>
-                      <span class="pqc-source-doc">{{ ref.documentName }}</span>
-                      <span class="pqc-source-page">第 {{ ref.pageNumber }} 页</span>
+                      <span class="pqc-source-badge">[{{ ref.document_id }}]</span>
+                      <span class="pqc-source-doc">{{ ref.document_name }}</span>
+                      <span class="pqc-source-page">第 {{ ref.page_no }} 页</span>
                     </div>
                     <blockquote class="pqc-source-excerpt">
                       "{{ ref.excerpt }}"
@@ -1101,7 +1115,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                       class="citation-chip"
                       :title="getRefById(cid)?.excerpt"
                     >
-                      [{{ cid }}] {{ getRefById(cid)?.documentName }} 第{{ getRefById(cid)?.pageNumber }}页
+                      [{{ cid }}] {{ getRefById(cid)?.document_name }} 第{{ getRefById(cid)?.page_no }}页
                     </span>
                   </div>
 
