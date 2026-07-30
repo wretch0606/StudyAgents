@@ -175,7 +175,7 @@ class PracticeFeedback(BaseModel):
 
 PROMPT_VERSIONS = {
     "coordinator": "coordinator-v1",
-    "knowledge": "knowledge-v1",
+    "knowledge": "knowledge-v1.1",
     "evaluator": "evaluator-qa-v1",
     "questioner": "questioner-v1",
     "evaluator_practice": "evaluator-practice-v1",
