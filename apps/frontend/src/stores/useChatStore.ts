@@ -11,6 +11,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 
 // ============================================================
 // 公开类型（供视图层使用）
@@ -163,6 +164,7 @@ export const useChatStore = defineStore('chat', () => {
     } catch (err) {
       console.error('[useChatStore] fetchHistory 失败:', err)
       // 失败时保持空状态，视图层展示空提示
+      ElMessage.error('对话历史加载失败，请刷新页面重试')
     } finally {
       loading.value = false
     }
