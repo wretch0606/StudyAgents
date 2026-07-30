@@ -21,6 +21,16 @@ create_annotation_packets = importlib.util.module_from_spec(PACKETS_SPEC)
 sys.modules[PACKETS_SPEC.name] = create_annotation_packets
 PACKETS_SPEC.loader.exec_module(create_annotation_packets)
 
+MERGE_PATH = Path(__file__).parent / "evaluation" / "merge_annotation_packets.py"
+MERGE_SPEC = importlib.util.spec_from_file_location(
+    "merge_annotation_packets",
+    MERGE_PATH,
+)
+assert MERGE_SPEC and MERGE_SPEC.loader
+merge_annotation_packets = importlib.util.module_from_spec(MERGE_SPEC)
+sys.modules[MERGE_SPEC.name] = merge_annotation_packets
+MERGE_SPEC.loader.exec_module(merge_annotation_packets)
+
 
 def test_explicit_scan_page_routing() -> None:
     assert run_live._explicit_scan_pages("扫描试卷第一页是什么？") == [1]
@@ -50,3 +60,16 @@ def test_annotation_assignments_follow_team_ownership() -> None:
     assert create_annotation_packets.assigned_annotators(
         {"category": "cross_knowledge", "mode": "qa"}
     ) == ("B", "C")
+
+
+def test_merge_recovers_annotation_tail_from_damaged_context() -> None:
+    damaged = (
+        '{"case_id":"db-004","annotator_id":"E","query":"解释"实例"",'
+        '"judgments":{"answer":"fail","citation":"na","refusal":"na",'
+        '"grading":"na"},"notes":"证据不足"}'
+    )
+    row, recovered = merge_annotation_packets.parse_packet_line(damaged)
+    assert recovered is True
+    assert row["case_id"] == "db-004"
+    assert row["judgments"]["answer"] == "fail"
+    assert row["notes"] == "证据不足"
