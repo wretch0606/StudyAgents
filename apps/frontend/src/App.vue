@@ -11,12 +11,16 @@
 
 import { onMounted, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { useUserStore } from './stores/useUserStore'
+import { useWrongBookStore } from './stores/useWrongBookStore'
 import { setLoginRedirectHandler } from './utils/request'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
+const wrongBookStore = useWrongBookStore()
+const { count: wrongBookCount } = storeToRefs(wrongBookStore)
 
 // ---- 应用启动：会话恢复 + 注册 401 重定向 ----
 
@@ -64,11 +68,12 @@ function handleLogout() {
         <router-link to="/" class="nav-link" active-class="nav-link--active" exact>
           问答
         </router-link>
-        <router-link to="/training" class="nav-link" active-class="nav-link--active">
+        <router-link to="/?mode=practice" class="nav-link" active-class="nav-link--active">
           训练
         </router-link>
-        <router-link to="/wrong-book" class="nav-link" active-class="nav-link--active">
+        <router-link to="/?mode=wrongbook" class="nav-link" active-class="nav-link--active">
           错题本
+          <span v-if="wrongBookCount > 0" class="nav-badge">{{ wrongBookCount }}</span>
         </router-link>
         <router-link
           v-if="userRole === 'admin'"
@@ -113,6 +118,13 @@ html, body, #app {
   max-width: none;
   border: none;
   text-align: left;
+  --nav-height: 48px;
+}
+
+@media (max-width: 768px) {
+  #app {
+    --nav-height: 42px;
+  }
 }
 </style>
 
@@ -122,6 +134,7 @@ html, body, #app {
    ============================================================ */
 
 .app-nav {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -168,6 +181,23 @@ html, body, #app {
 .nav-link--active {
   color: #a78bfa;
   background: rgba(167, 139, 250, 0.1);
+}
+
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 17px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 9px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
 }
 
 .nav-right {
