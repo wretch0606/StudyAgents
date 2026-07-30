@@ -275,23 +275,23 @@ async def test_valid_citation_passes():
         )
     ]
 
-    gateway = FakeModelGateway()
+    gateway = FakeModelGateway(outputs={
+        "QAAnswer": {"answer": "测试回答[test.pdf 第1页]。", "citations": [],
+                     "source_ref_ids": ["chunk-test-001"],
+                     "confidence_note": "", "public_summary": "test"}
+    })
     state = _base_state(
         evidence=evidence,
-        knowledge=[
-            {
-                "fact": "一个有效引用的事实",
-                "source_ref_ids": ["chunk-test-001"],  # 在 evidence 中
-                "knowledge_point_ids": [],
-            }
-        ],
+        knowledge=[{
+            "fact": "一个有效引用的事实",
+            "source_ref_ids": ["chunk-test-001"],
+            "knowledge_point_ids": [],
+        }],
     )
     cfg = _config(model=gateway)
-    sink = FakeEventSink()
-    cfg["configurable"]["event_sink"] = sink
+    cfg["configurable"]["event_sink"] = FakeEventSink()
 
     result = await evaluator_qa_node(state, cfg)
-
     assert result.get("next_node") == "__end__", (
         f"有效引用应正常结束，实际 {result.get('next_node')}"
     )
@@ -631,11 +631,11 @@ async def test_citation_fake_doc_rejected():
 
 
 @pytest.mark.asyncio
-async def test_citation_wrong_page_still_passes():
-    """页码偏差不拒绝（内容可能在相邻页），只拒绝虚构文档"""
+async def test_citation_wrong_page_rejected():
+    """错误页码必须拒绝——项目要求每个结论由实际引用页支持"""
     from agents.graph import _check_citations
     ok, err = _check_citations("答案是xxx[数据库讲义.pdf 第99页]。", _CITE_EVIDENCE)
-    assert ok, f"页码偏差应通过（内容可能在相邻页），但被拒绝: {err}"
+    assert not ok, "错误页码必须被拒绝"
 
 
 @pytest.mark.asyncio

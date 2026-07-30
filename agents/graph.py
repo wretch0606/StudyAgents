@@ -175,16 +175,23 @@ def _source_ref_to_state(ref: WorkerSourceRef | Mapping[str, Any]) -> SourceRef:
 
 
 def _check_citations(answer_text: str, evidence: list[dict]) -> tuple[bool, str]:
-    """校验引用指向真实证据文档（模块级，可单测）"""
+    """校验引用文档名与页码均指向真实证据（模块级，可单测）"""
     import re as _re
     _valid_docs = {ref["document_name"] for ref in evidence}
+    _valid_pages = {(ref["document_name"], ref["page_number"]) for ref in evidence}
     _found = _re.findall(r'\[(.+?)\s*第(\d+)\s*页\]', answer_text)
     if not _found:
         return False, "回答中完全缺少 [文档名 第X页] 引用标记"
     for _doc_name, _page in _found:
         _doc_name = _doc_name.strip()
+        _page_num = int(_page)
         if _doc_name not in _valid_docs:
             return False, f"引用虚构文档: [{_doc_name} 第{_page}页]"
+        if (_doc_name, _page_num) not in _valid_pages:
+            return False, (
+                f"引用错误页码: [{_doc_name} 第{_page}页]，"
+                f"evidence 中不存在此文档的该页码"
+            )
     return True, ""
 
 
@@ -436,7 +443,8 @@ async def evaluator_qa_node(
     # 【Day6 修复】引用准确率 — 强制校验引用必须来自本次 evidence
     _cite_ok, _cite_err = _check_citations(answer.answer, evidence)
     if not _cite_ok and evidence:
-        import logging as _logging; _log = _logging.getLogger(__name__)
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         _valid_doc_names = {ref["document_name"] for ref in evidence}
         _log.warning("回答中引用不合格(%s)，重试一次", _cite_err)
         _retry_msg = EVALUATOR_USER.format(
