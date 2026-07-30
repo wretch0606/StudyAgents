@@ -11,10 +11,10 @@ import json
 import re
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CASES = ROOT / "cases.public.jsonl"
@@ -234,7 +234,10 @@ def validate_cases(
 
         if case.get("mode") == "training":
             if behavior != "grade" or not isinstance(case.get("student_answer"), str):
-                errors.append(f"{case_id}: training cases require a synthetic answer and grade behavior")
+                errors.append(
+                    f"{case_id}: training cases require a synthetic answer "
+                    "and grade behavior"
+                )
         elif case.get("student_answer") is not None:
             errors.append(f"{case_id}: qa cases must use null student_answer")
 
@@ -307,15 +310,25 @@ def _annotation_metric(
     annotations_by_id: dict[str, list[dict[str, Any]]],
     metric_name: str,
     policies: dict[str, Any],
-) -> tuple[Metric, list[str], list[str]]:
+    results_by_id: dict[str, dict[str, Any]],
+    arbitrations_by_key: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[Metric, list[str], list[str], list[str], int]:
     numerator = 0.0
     denominator = 0
     incomplete: list[str] = []
     disagreements: list[str] = []
+    failed: list[str] = []
+    resolved = 0
 
     for case in cases:
         dimensions = policies[case["scoring_policy"]]["dimensions"]
         if metric_name not in dimensions:
+            continue
+
+        result = results_by_id.get(case["case_id"])
+        if result and result.get("actual_behavior") != case["expected_behavior"]:
+            denominator += 1
+            failed.append(case["case_id"])
             continue
 
         distinct: dict[str, str] = {}
@@ -333,12 +346,22 @@ def _annotation_metric(
         selected = list(distinct.values())
         denominator += 1
         if len(set(selected)) > 1:
-            disagreements.append(case["case_id"])
+            arbitration = arbitrations_by_key.get((case["case_id"], metric_name))
+            if arbitration is None:
+                disagreements.append(case["case_id"])
+                continue
+            resolved += 1
+            if arbitration["judgment"] == "pass":
+                numerator += 1
+            else:
+                failed.append(case["case_id"])
             continue
         if selected[0] == "pass":
             numerator += 1
+        else:
+            failed.append(case["case_id"])
 
-    return Metric(numerator, denominator), incomplete, disagreements
+    return Metric(numerator, denominator), incomplete, disagreements, failed, resolved
 
 
 def validate_results(
@@ -399,6 +422,35 @@ def validate_annotations(
         invalid = {value for value in judgments.values() if value not in JUDGMENTS}
         if invalid:
             errors.append(f"{case_id}/{annotator_id}: invalid judgments {sorted(invalid)}")
+    return errors
+
+
+def validate_arbitrations(
+    arbitrations: list[dict[str, Any]],
+    valid_ids: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for row in arbitrations:
+        case_id = row.get("case_id")
+        metric = row.get("metric")
+        arbiter_id = row.get("arbiter_id")
+        judgment = row.get("judgment")
+        reason = row.get("reason")
+        if case_id not in valid_ids:
+            errors.append(f"arbitration has unknown case_id {case_id!r}")
+        if metric not in {"answer", "citation", "grading"}:
+            errors.append(f"{case_id}: invalid arbitration metric {metric!r}")
+        key = (str(case_id), str(metric))
+        if key in seen:
+            errors.append(f"duplicate arbitration for {case_id}/{metric}")
+        seen.add(key)
+        if not isinstance(arbiter_id, str) or not arbiter_id.strip():
+            errors.append(f"{case_id}/{metric}: arbiter_id is required")
+        if judgment not in {"pass", "fail"}:
+            errors.append(f"{case_id}/{metric}: judgment must be pass or fail")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"{case_id}/{metric}: reason is required")
     return errors
 
 
@@ -464,6 +516,7 @@ def build_report(
     results: list[dict[str, Any]],
     annotations: list[dict[str, Any]],
     manifest: dict[str, Any],
+    arbitrations: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     policies = policy_document["policies"]
     gates = policy_document["quality_gates"]
@@ -471,18 +524,43 @@ def build_report(
     annotations_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in annotations:
         annotations_by_id[row["case_id"]].append(row)
+    arbitrations_by_key = {
+        (row["case_id"], row["metric"]): row for row in (arbitrations or [])
+    }
 
     recall = _recall_metric(cases, results_by_id)
-    answer, answer_missing, answer_disagreements = _annotation_metric(
-        cases, annotations_by_id, "answer", policies
+    answer, answer_missing, answer_disagreements, answer_failed, answer_resolved = (
+        _annotation_metric(
+            cases,
+            annotations_by_id,
+            "answer",
+            policies,
+            results_by_id,
+            arbitrations_by_key,
+        )
     )
-    citation, citation_missing, citation_disagreements = _annotation_metric(
-        cases, annotations_by_id, "citation", policies
+    citation, citation_missing, citation_disagreements, citation_failed, citation_resolved = (
+        _annotation_metric(
+            cases,
+            annotations_by_id,
+            "citation",
+            policies,
+            results_by_id,
+            arbitrations_by_key,
+        )
     )
     refusal = _behavior_metric(cases, results_by_id, "refuse")
-    grading, grading_missing, grading_disagreements = _annotation_metric(
-        cases, annotations_by_id, "grading", policies
+    grading, grading_missing, grading_disagreements, grading_failed, grading_resolved = (
+        _annotation_metric(
+            cases,
+            annotations_by_id,
+            "grading",
+            policies,
+            results_by_id,
+            arbitrations_by_key,
+        )
     )
+    resolved_arbitrations = answer_resolved + citation_resolved + grading_resolved
     metrics = {
         "recall_at_5": recall,
         "answer_accuracy": answer,
@@ -573,6 +651,27 @@ def build_report(
         )
         defect_no += 1
 
+    metric_failures = (
+        ("answer_accuracy", answer_failed, "C", "my-mayun"),
+        ("citation_accuracy", citation_failed, "B", "ssf13546"),
+        ("grading_agreement", grading_failed, "C", "my-mayun"),
+    )
+    for metric, case_ids, owner_role, owner in metric_failures:
+        for case_id in sorted(set(case_ids)):
+            defects.append(
+                _make_defect(
+                    defect_no,
+                    case_id,
+                    metric,
+                    owner_role,
+                    owner,
+                    f"{metric} judgment failed",
+                    "pass under the fixed scoring policy",
+                    "fail after annotation or deterministic behavior check",
+                )
+            )
+            defect_no += 1
+
     for case in cases:
         result = results_by_id.get(case["case_id"])
         if result is None:
@@ -611,7 +710,7 @@ def build_report(
     elapsed = [
         float(row["latency_ms"])
         for row in results
-        if isinstance(row.get("latency_ms"), (int, float))
+        if isinstance(row.get("latency_ms"), int | float)
     ]
     p95 = None
     if elapsed:
@@ -684,6 +783,7 @@ def build_report(
             f"- 缺少运行结果：{len(missing_results)} 条。",
             f"- 缺少规定人数标注：{len(missing_annotations)} 条。",
             f"- 未仲裁标注分歧：{len(disagreements)} 条。",
+            f"- 已仲裁标注分歧：{resolved_arbitrations} 条。",
             f"- 已生成缺陷：{len(defects)} 条。",
             "",
             "## 主要失败类型",
@@ -706,7 +806,8 @@ def build_report(
                 if status == "PASS"
                 else "输入齐备，但至少一项质量门槛未达标；按缺陷清单冻结新功能并修复。"
                 if status == "FAIL"
-                else "当前报告不完整，不得用于宣称答辩版本达标。先补齐运行结果、双人标注和分歧仲裁。"
+                else "当前报告不完整，不得用于宣称答辩版本达标。"
+                "先补齐运行结果、双人标注和分歧仲裁。"
             ),
             "",
         ]
@@ -734,19 +835,28 @@ def _report_command(args: argparse.Namespace) -> int:
     policies = load_json(args.policies)
     results = load_jsonl(args.results)
     annotations = load_jsonl(args.annotations)
+    arbitrations = load_jsonl(args.arbitrations) if args.arbitrations else []
     manifest = load_json(args.manifest)
 
     errors = validate_cases(cases, policies)
     valid_ids = {case["case_id"] for case in cases}
     errors.extend(validate_results(results, valid_ids))
     errors.extend(validate_annotations(annotations, valid_ids))
+    errors.extend(validate_arbitrations(arbitrations, valid_ids))
     errors.extend(validate_manifest(manifest))
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
-    report, defects = build_report(cases, policies, results, annotations, manifest)
+    report, defects = build_report(
+        cases,
+        policies,
+        results,
+        annotations,
+        manifest,
+        arbitrations,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8", newline="\n")
     write_jsonl(args.defects, defects)
@@ -769,6 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--policies", type=Path, default=DEFAULT_POLICIES)
     report_parser.add_argument("--results", type=Path, required=True)
     report_parser.add_argument("--annotations", type=Path, required=True)
+    report_parser.add_argument("--arbitrations", type=Path)
     report_parser.add_argument("--manifest", type=Path, required=True)
     report_parser.add_argument("--output", type=Path, required=True)
     report_parser.add_argument("--defects", type=Path, required=True)

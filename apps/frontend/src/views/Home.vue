@@ -7,21 +7,27 @@
 //   2. 中间：PDF/OCR 导入入口 + 含拒答场景的 Mock 对话
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../stores/useChatStore'
+import { useWrongBookStore } from '../stores/useWrongBookStore'
+import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
 import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
-import { tokenizeMarkdownLine } from '../utils/markdown'
+import KaTeXEditor from '../components/KaTeXEditor.vue'
+import { renderMixedHtml } from '../utils/katex-renderer'
+
 
 // =========================================================
 // 聊天状态（Pinia Store）
 // =========================================================
 
 const chatStore = useChatStore()
+const wrongBookStore = useWrongBookStore()
 // 仅提取 Home.vue 模板直接使用的状态（AgentDrawer 自行从 Store 读取）
-const { messages, isStreaming, attachments } = storeToRefs(chatStore)
+const { messages, isStreaming, attachments, agentSteps } = storeToRefs(chatStore)
 
 // ---- 页面挂载时发起网络请求获取对话历史 ----
 onMounted(() => {
@@ -35,11 +41,266 @@ type NavMode = 'chat' | 'practice' | 'wrongbook'
 
 const navMode = ref<NavMode>('chat')
 
+// 从路由 query 同步初始模式（顶部导航栏 "训练" 跳转 → /?mode=practice）
+const route = useRoute()
+if (route.query.mode === 'practice') {
+  navMode.value = 'practice'
+} else if (route.query.mode === 'wrongbook') {
+  navMode.value = 'wrongbook'
+}
+
+// 监听路由 query 变化，同步导航模式
+watch(
+  () => route.query.mode,
+  (mode) => {
+    if (mode === 'practice') navMode.value = 'practice'
+    else if (mode === 'wrongbook') navMode.value = 'wrongbook'
+    else navMode.value = 'chat'
+  },
+)
+
+const router = useRouter()
+
 function switchMode(mode: NavMode) {
   navMode.value = mode
+
+  // 同步路由 query，确保顶部导航栏与左侧菜单栏路由一致
   if (mode === 'chat') {
     drawerOpen.value = true
+    router.replace({ path: '/', query: {} })
+  } else if (mode === 'practice') {
+    router.replace({ path: '/', query: { mode: 'practice' } })
+  } else if (mode === 'wrongbook') {
+    router.replace({ path: '/', query: { mode: 'wrongbook' } })
   }
+}
+
+// =========================================================
+// 专项训练 — 答题状态
+// =========================================================
+
+/** 是否已进入答题模式（false = 章节选择，true = 答题区） */
+const isTraining = ref(false)
+
+/** 选中的章节 */
+const selectedChapter = ref('')
+
+/** 选中的题型 */
+const selectedType = ref('')
+
+/** 选中的难度 */
+const selectedDifficulty = ref('')
+
+/** 选中的题目数量 */
+const selectedCount = ref('5')
+
+/** 开始训练：收集配置参数 → 初始化 Agent 轨迹 → 切换至答题编辑器 */
+function startTraining() {
+  const config = {
+    chapter: selectedChapter.value,
+    type: selectedType.value,
+    difficulty: selectedDifficulty.value,
+    count: selectedCount.value,
+  }
+  console.log('[专项训练] 训练配置参数：', config)
+
+  isTraining.value = true
+  isSubmitted.value = false
+  evaluationReport.value = null
+  trainingAnswer.value = ''
+  chatStore.initPracticeTraces()
+}
+
+/** 返回章节选择 */
+function backToSelect() {
+  isTraining.value = false
+  isSubmitted.value = false
+  evaluationReport.value = null
+  trainingAnswer.value = ''
+  selectedType.value = ''
+  selectedDifficulty.value = ''
+  chatStore.clearAgentTraces()
+}
+
+/** 答题区 v-model 绑定的用户输入 */
+const trainingAnswer = ref('')
+
+
+/** 是否已提交答案 */
+const isSubmitted = ref(false)
+
+/** 是否正在评测中（Evaluator running） */
+const isEvaluating = ref(false)
+
+/** 评测报告 */
+const evaluationReport = ref<{
+  score: number
+  total: number
+  analysis: string
+  highlights: string[]
+  /** 评测置信度 (0–1) */
+  confidence: number
+  /** 评测引用的文档溯源卡片 */
+  sourceRefs: SourceRefDisplay[]
+} | null>(null)
+
+/** 得分率 (0–100)，用于圆环仪表 */
+const scorePercent = computed(() => {
+  if (!evaluationReport.value) return 0
+  return Math.round((evaluationReport.value.score / evaluationReport.value.total) * 100)
+})
+
+/** 得分等级（CSS class） */
+const scoreGrade = computed(() => {
+  const p = scorePercent.value
+  if (p >= 80) return 'grade-high'
+  if (p >= 60) return 'grade-mid'
+  return 'grade-low'
+})
+
+/** 得分圆环 SVG stroke-dash 参数 */
+const scoreRingDash = computed(() => {
+  const circumference = 2 * Math.PI * 54 // r=54
+  const p = scorePercent.value
+  const filled = (p / 100) * circumference
+  return { circumference, filled }
+})
+
+/** 章节中文标签（computed） */
+const chapterLabel = computed(() => {
+  switch (selectedChapter.value) {
+    case 'ch3': return '第 3 章 · 运输层'
+    case 'ch4': return '第 4 章 · 网络层'
+    case 'ch5': return '第 5 章 · 链路层'
+    default: return ''
+  }
+})
+
+/** 章节 → 知识点映射（用于掌握度联动更新） */
+const CHAPTER_KP_MAP: Record<string, string[]> = {
+  ch3: ['kp1'],           // 运输层 → TCP 协议
+  ch4: ['kp2'],           // 网络层 → IP 与路由
+  ch5: [],                // 链路层暂无直接对应知识点（后续扩展）
+}
+
+/** 根据得分降低对应章节的知识点掌握度（模拟训练反馈闭环） */
+function applyMasteryDegradation(chapter: string, score: number, total: number) {
+  const kpIds = CHAPTER_KP_MAP[chapter]
+  if (!kpIds || kpIds.length === 0) return
+
+  const scoreRate = score / total
+  // 得分率越低，掌握度衰减越大（0.02–0.15）
+  const decay = Math.round((1 - scoreRate) * 0.15 * 100) / 100
+
+  for (const kpId of kpIds) {
+    const record = masteryRecords.value.find((r) => r.kpId === kpId)
+    if (record) {
+      record.mastery = Math.max(0, Math.round((record.mastery - decay) * 100) / 100)
+    }
+  }
+
+  // 重新计算总体掌握度
+  const sum = masteryRecords.value.reduce((acc, r) => acc + r.mastery, 0)
+  overallMastery.value = Math.round((sum / masteryRecords.value.length) * 100) / 100
+}
+
+/** 当前题目题干（纯文本，用于错题本存储） */
+const currentQuestionText = computed(() => {
+  // 与模板中 .pqc-prompt 内容保持同步（去除 HTML 标签后的纯文本）
+  return '请简述 TCP 拥塞控制中慢启动与拥塞避免两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。'
+})
+
+/** 提交答案 → 触发 Evaluator 评测 + 低分自动沉淀至错题本 */
+async function submitAnswer() {
+  if (isEvaluating.value || isSubmitted.value) return
+  isEvaluating.value = true
+
+  try {
+    const report = await chatStore.submitAnswerForEvaluation()
+    evaluationReport.value = report
+    isSubmitted.value = true
+
+    // ---- 错题沉淀：得分 < 80 自动收录 ----
+    if (report.score < 80) {
+      wrongBookStore.addEntry({
+        chapter: selectedChapter.value,
+        chapterLabel: chapterLabel.value,
+        question: currentQuestionText.value,
+        userAnswer: trainingAnswer.value,
+        score: report.score,
+        total: report.total,
+        analysis: report.analysis,
+        highlights: report.highlights,
+      })
+
+      // ---- 掌握度联动：低分 → 衰减对应知识点 ----
+      applyMasteryDegradation(selectedChapter.value, report.score, report.total)
+    }
+  } finally {
+    isEvaluating.value = false
+  }
+}
+
+// =========================================================
+// 错题本 — 展开/折叠状态
+// =========================================================
+
+/** 当前展开查看详情的错题 ID（null = 全部折叠） */
+const expandedWrongId = ref<string | null>(null)
+
+/** 切换错题卡片的展开/折叠状态 */
+function toggleWrongEntry(id: string) {
+  expandedWrongId.value = expandedWrongId.value === id ? null : id
+}
+
+/** 截断文本（用于错题卡片简述） */
+function truncateText(text: string, maxLen: number): string {
+  const cleaned = text.replace(/<[^>]+>/g, '')
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '…' : cleaned
+}
+
+/** 格式化 ISO 时间为可读字符串 */
+function formatWrongDate(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return '刚刚'
+  if (diffMin < 60) return `${diffMin} 分钟前`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr} 小时前`
+  const diffDay = Math.floor(diffHr / 24)
+  if (diffDay < 7) return `${diffDay} 天前`
+  return d.toLocaleDateString('zh-CN')
+}
+
+/** 根据得分返回 CSS class */
+function wrongScoreClass(score: number): string {
+  if (score >= 80) return 'wb-score-high'
+  if (score >= 60) return 'wb-score-mid'
+  return 'wb-score-low'
+}
+
+/** 根据评测细项前缀返回 CSS class */
+function wrongHighlightClass(item: string): string {
+  if (item.startsWith('✅')) return 'hl-good'
+  if (item.startsWith('⚠️')) return 'hl-warn'
+  return 'hl-tip'
+}
+
+/** 点击错题「重新练习」→ 跳转至专项训练并预填章节 */
+function retryWrongQuestion(entry: WrongBookEntry) {
+  selectedChapter.value = entry.chapter
+  navMode.value = 'practice'
+  // 重置表单状态，预填章节但保留题型/难度供用户选择
+  nextTick(() => {
+    isTraining.value = false
+    isSubmitted.value = false
+    evaluationReport.value = null
+    trainingAnswer.value = ''
+    selectedType.value = ''
+    selectedDifficulty.value = ''
+  })
 }
 
 // =========================================================
@@ -79,7 +340,26 @@ const masteryRecords = ref<MasteryRecord[]>([
 ])
 
 const overallMastery = ref(0.64)
-const pendingWrongCount = ref(7)
+
+/** 错题本徽标数 — 动态响应 store 实际长度 */
+const pendingWrongCount = computed(() => wrongBookStore.count)
+
+/** 错题本章节筛选 */
+const wrongBookFilter = ref('all')
+
+/** 筛选后的错题列表 */
+const filteredWrongEntries = computed(() => {
+  const list = wrongBookStore.sortedEntries
+  if (!wrongBookFilter.value || wrongBookFilter.value === 'all') return list
+  return list.filter((e) => e.chapter === wrongBookFilter.value)
+})
+
+/** 章节 key → 中文标签映射（供筛选下拉和卡片使用） */
+const chapterLabelMap: Record<string, string> = {
+  ch3: '第 3 章 · 运输层',
+  ch4: '第 4 章 · 网络层',
+  ch5: '第 5 章 · 链路层',
+}
 
 // =========================================================
 // 用户输入 & 发送（已接入 SSE 流式打字机模拟）
@@ -361,14 +641,19 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           <!-- 错题本模式下的筛选 -->
           <template v-if="navMode === 'wrongbook'">
             <el-select
-              model-value="all"
+              v-model="wrongBookFilter"
               size="small"
               class="header-select"
-              placeholder="知识点筛选"
+              placeholder="章节筛选"
+              clearable
             >
-              <el-option label="全部知识点" value="all" />
-              <el-option label="TCP 协议" value="kp1" />
-              <el-option label="IP 与路由" value="kp2" />
+              <el-option label="全部章节" value="all" />
+              <el-option
+                v-for="(count, ch) in wrongBookStore.countByChapter"
+                :key="ch"
+                :value="ch"
+                :label="`${chapterLabelMap[ch] || ch} (${count})`"
+              />
             </el-select>
           </template>
 
@@ -389,38 +674,109 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
 
       <!-- 错题本视图 -->
       <template v-if="navMode === 'wrongbook'">
-        <el-scrollbar class="wrongbook-scroll">
+        <!-- 完全空状态 -->
+        <div v-if="wrongBookStore.count === 0" class="wrongbook-empty">
+          <svg class="wrongbook-empty-icon" viewBox="0 0 64 64" fill="none">
+            <rect x="12" y="8" width="40" height="48" rx="6" stroke="var(--text)" stroke-width="1.5" opacity="0.3" />
+            <path d="M22 24h14M22 32h20M22 40h8" stroke="var(--text)" stroke-width="1.5" stroke-linecap="round" opacity="0.2" />
+            <circle cx="46" cy="46" r="12" fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" />
+            <path d="M46 42v8m-4-4h8" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" opacity="0.5" />
+          </svg>
+          <h3 class="wrongbook-empty-title">错题本为空</h3>
+          <p class="wrongbook-empty-desc">完成专项训练后，得分低于 80 分的题目会自动收录到错题本，方便你针对性复习薄弱知识点。</p>
+        </div>
+
+        <!-- 筛选无匹配 -->
+        <div v-else-if="filteredWrongEntries.length === 0" class="wrongbook-empty">
+          <h3 class="wrongbook-empty-title">无匹配结果</h3>
+          <p class="wrongbook-empty-desc">当前章节筛选条件下没有错题，请切换筛选或清除筛选条件。</p>
+        </div>
+
+        <!-- 错题列表 -->
+        <el-scrollbar v-else class="wrongbook-scroll">
           <div class="wrongbook-inner">
-            <div class="wrongbook-card" v-for="i in 3" :key="'wb-' + i">
-              <div class="wb-status" :class="i === 1 ? 'pending' : i === 2 ? 'reviewing' : 'mastered'">
-                {{ i === 1 ? '待复习' : i === 2 ? '复习中' : '已掌握' }}
+            <div
+              v-for="entry in filteredWrongEntries"
+              :key="entry.id"
+              :class="['wrongbook-card', { expanded: expandedWrongId === entry.id }]"
+            >
+              <!-- 折叠态：一行摘要 -->
+              <div class="wb-card-row" @click="toggleWrongEntry(entry.id)">
+                <div class="wb-card-left">
+                  <span class="wb-chapter-tag">{{ entry.chapterLabel }}</span>
+                  <span class="wb-question-brief">{{ truncateText(entry.question, 50) }}</span>
+                </div>
+                <div class="wb-card-right">
+                  <span :class="['wb-score-pill', wrongScoreClass(entry.score)]">
+                    {{ entry.score }}<span class="wb-score-sep">/</span>{{ entry.total }}
+                  </span>
+                  <span class="wb-time">{{ formatWrongDate(entry.createdAt) }}</span>
+                  <svg
+                    :class="['wb-chevron', { open: expandedWrongId === entry.id }]"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                  </svg>
+                </div>
               </div>
-              <p class="wb-question">
-                {{
-                  i === 1
-                    ? '某主机 IP 地址为 192.168.1.37/28，请计算该子网的网络地址、广播地址和可用 IP 范围。'
-                    : i === 2
-                      ? 'TCP 拥塞控制中，若当前 cwnd = 24 MSS，ssthresh = 16 MSS，收到 3 个重复 ACK 后，cwnd 和 ssthresh 分别变为多少？'
-                      : 'HTTP/2 相比 HTTP/1.1 在性能方面做了哪些关键改进？请至少列出三项。'
-                }}
-              </p>
-              <div class="wb-meta">
-                <span class="wb-source">来源：{{ i === 3 ? '计算机网络.pdf 第 89 页' : '计算机网络.pdf' }}</span>
-                <span class="wb-kp">知识点：{{ i === 1 ? 'IP 与路由' : i === 2 ? 'TCP 协议' : 'HTTP/HTTPS' }}</span>
-                <span class="wb-count">错误 {{ i === 1 ? 3 : i === 2 ? 2 : 1 }} 次</span>
-              </div>
-              <div class="wb-actions">
-                <el-button size="small" type="primary" plain>重新练习</el-button>
-                <el-button size="small" plain>查看解析</el-button>
+
+              <!-- 展开态：完整详情 -->
+              <div v-if="expandedWrongId === entry.id" class="wb-card-detail">
+                <!-- 题目 -->
+                <div class="wb-detail-block">
+                  <h4 class="wb-detail-label">📋 题目</h4>
+                  <div class="wb-detail-content" v-html="renderMixedHtml(entry.question)" />
+                </div>
+
+                <!-- 你的作答 -->
+                <div class="wb-detail-block">
+                  <h4 class="wb-detail-label">✏️ 你的作答</h4>
+                  <div class="wb-detail-content" v-html="renderMixedHtml(entry.userAnswer || '（未作答）')" />
+                </div>
+
+                <!-- 评测报告 -->
+                <div class="wb-detail-block">
+                  <h4 class="wb-detail-label">📊 评测报告</h4>
+                  <div class="wb-detail-score-row">
+                    <span class="wb-detail-score-label">得分：</span>
+                    <span :class="['wb-score-pill', 'wb-score-pill-lg', wrongScoreClass(entry.score)]">
+                      {{ entry.score }} / {{ entry.total }}
+                    </span>
+                  </div>
+                  <div class="wb-detail-content" v-html="renderMixedHtml(entry.analysis)" />
+                  <ul class="wb-detail-highlights">
+                    <li
+                      v-for="(item, hi) in entry.highlights"
+                      :key="hi"
+                      :class="['pqc-hl-item', wrongHighlightClass(item)]"
+                    >
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="wb-detail-actions">
+                  <el-button size="small" type="primary" plain @click.stop="retryWrongQuestion(entry)">
+                    🔄 重新练习
+                  </el-button>
+                  <el-button size="small" type="danger" plain @click.stop="wrongBookStore.removeEntry(entry.id)">
+                    🗑 删除
+                  </el-button>
+                </div>
               </div>
             </div>
           </div>
         </el-scrollbar>
       </template>
 
-      <!-- 专项训练视图（占位） -->
+      <!-- 专项训练视图 -->
       <template v-else-if="navMode === 'practice'">
-        <div class="practice-placeholder">
+        <!-- ================================================ -->
+        <!-- 阶段 1：章节选择表单                              -->
+        <!-- ================================================ -->
+        <div v-if="!isTraining" class="practice-placeholder">
           <svg class="practice-icon" viewBox="0 0 64 64" fill="none">
             <rect x="8" y="8" width="48" height="48" rx="10" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3" />
             <path d="M22 28h20M22 36h14" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" opacity="0.6" />
@@ -428,19 +784,200 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
             <path d="M46 40v8m-4-4h8" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" />
           </svg>
           <h3 class="practice-title">开始专项训练</h3>
-          <p class="practice-desc">选择章节和知识点，AI 将基于课程资料生成针对性练习题，完成后由 Evaluator Agent 分步评分并生成详细讲解。</p>
+          <p class="practice-desc">配置训练参数，AI 将基于课程资料生成针对性练习题，完成后由 Evaluator Agent 分步评分并生成详细讲解。</p>
           <div class="practice-config">
-            <el-select model-value="" placeholder="选择章节" style="width: 180px">
+            <el-select v-model="selectedChapter" placeholder="选择章节" style="width: 180px">
               <el-option label="第 3 章 · 运输层" value="ch3" />
               <el-option label="第 4 章 · 网络层" value="ch4" />
               <el-option label="第 5 章 · 链路层" value="ch5" />
             </el-select>
-            <el-select model-value="" placeholder="题目数量" style="width: 140px">
+            <el-select v-model="selectedType" placeholder="选择题型" style="width: 150px">
+              <el-option label="单选题" value="single" />
+              <el-option label="多选题" value="multiple" />
+              <el-option label="综合问答题" value="essay" />
+            </el-select>
+            <el-select v-model="selectedDifficulty" placeholder="选择难度" style="width: 130px">
+              <el-option label="简单" value="easy" />
+              <el-option label="中等" value="medium" />
+              <el-option label="困难" value="hard" />
+            </el-select>
+            <el-select v-model="selectedCount" placeholder="题目数量" style="width: 130px">
               <el-option label="3 题" value="3" />
               <el-option label="5 题" value="5" />
               <el-option label="10 题" value="10" />
             </el-select>
-            <el-button type="primary" size="large" round>开始训练</el-button>
+            <el-button
+              type="primary"
+              size="large"
+              round
+              :disabled="!selectedChapter || !selectedType || !selectedDifficulty"
+              @click="startTraining"
+            >
+              开始训练
+            </el-button>
+          </div>
+        </div>
+
+        <!-- ================================================ -->
+        <!-- 阶段 2：答题区（KaTeXEditor）                     -->
+        <!-- ================================================ -->
+        <div v-else class="practice-session">
+          <div class="practice-session-header">
+            <el-button text size="small" @click="backToSelect">
+              <svg viewBox="0 0 20 20" fill="currentColor" style="width:16px;height:16px">
+                <path fill-rule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clip-rule="evenodd" />
+              </svg>
+              返回章节选择
+            </el-button>
+            <span class="practice-session-tag">
+              {{ chapterLabel }}
+              · {{ selectedType === 'single' ? '单选题' : selectedType === 'multiple' ? '多选题' : '综合问答题' }}
+              · {{ selectedDifficulty === 'easy' ? '简单' : selectedDifficulty === 'medium' ? '中等' : '困难' }}
+              · {{ selectedCount }} 题
+            </span>
+          </div>
+
+          <!-- 答题主体：flex 列布局，编辑器与评测报告为同级兄弟节点 -->
+          <div class="practice-session-body">
+            <div class="pqc-header">
+              <span class="pqc-num">第 1 题</span>
+              <span class="pqc-type">综合问答</span>
+            </div>
+            <p class="pqc-prompt">
+              请简述 TCP 拥塞控制中<strong>慢启动</strong>与<strong>拥塞避免</strong>两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。
+            </p>
+
+            <!-- 作答区：编辑器 + 实时预览（KaTeXEditor 内置双栏布局） -->
+            <KaTeXEditor
+              v-model="trainingAnswer"
+              :readonly="isSubmitted"
+              placeholder="在此作答，可混合文本与 LaTeX 公式…&#10;&#10;例如：慢启动阶段 cwnd 呈指数增长，公式为&#10;&#10;$$cwnd_{n+1} = 2 \\cdot cwnd_n$$&#10;&#10;而拥塞避免阶段 cwnd 每 RTT 线性增长 1 MSS…"
+            />
+
+            <!-- 提交按钮（与编辑器、评测报告同级） -->
+            <div v-if="!isSubmitted" class="pqc-submit-area">
+              <el-button
+                type="primary"
+                size="large"
+                round
+                :loading="isEvaluating"
+                :disabled="!trainingAnswer.trim() || isEvaluating"
+                @click="submitAnswer"
+              >
+                {{ isEvaluating ? '评测中…' : '提交答案' }}
+              </el-button>
+            </div>
+
+            <!-- ================================================ -->
+            <!-- 评测报告：得分仪表 + Agent 反馈 + 讲解 + 溯源     -->
+            <!-- ================================================ -->
+            <div v-if="isSubmitted && evaluationReport" class="pqc-report">
+              <!-- ---------- 顶部：得分仪表 + 置信度 ---------- -->
+              <div class="pqc-report-hero">
+                <!-- 得分圆环仪表 -->
+                <div class="pqc-score-gauge">
+                  <svg class="pqc-gauge-svg" viewBox="0 0 120 120">
+                    <circle
+                      cx="60" cy="60" r="54"
+                      fill="none"
+                      stroke="var(--border)"
+                      stroke-width="8"
+                    />
+                    <circle
+                      cx="60" cy="60" r="54"
+                      fill="none"
+                      :stroke="scorePercent >= 80 ? '#34d399' : scorePercent >= 60 ? '#f59e0b' : '#f87171'"
+                      stroke-width="8"
+                      stroke-linecap="round"
+                      :stroke-dasharray="`${scoreRingDash.filled} ${scoreRingDash.circumference - scoreRingDash.filled}`"
+                      transform="rotate(-90 60 60)"
+                      class="pqc-gauge-arc"
+                    />
+                    <text x="60" y="56" text-anchor="middle" class="pqc-gauge-score">
+                      {{ evaluationReport.score }}
+                    </text>
+                    <text x="60" y="74" text-anchor="middle" class="pqc-gauge-label">
+                      / {{ evaluationReport.total }}
+                    </text>
+                  </svg>
+                </div>
+
+                <!-- 得分元信息 -->
+                <div class="pqc-score-meta">
+                  <div :class="['pqc-grade-badge', scoreGrade]">
+                    {{ scorePercent >= 80 ? '🎯 优秀' : scorePercent >= 60 ? '📖 良好' : '📝 需加强' }}
+                  </div>
+                  <div class="pqc-confidence">
+                    <span class="pqc-conf-label">评测置信度</span>
+                    <div class="pqc-conf-bar-track">
+                      <div
+                        class="pqc-conf-bar-fill"
+                        :style="{ width: Math.round(evaluationReport.confidence * 100) + '%' }"
+                      ></div>
+                    </div>
+                    <span class="pqc-conf-pct">{{ Math.round(evaluationReport.confidence * 100) }}%</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ---------- Agent 分步反馈 ---------- -->
+              <div class="pqc-report-section">
+                <h4 class="pqc-section-title">🤖 Agent 协同执行轨迹</h4>
+                <div class="pqc-agent-steps">
+                  <div
+                    v-for="step in agentSteps"
+                    :key="step.agentRole"
+                    :class="['pqc-agent-chip', step.status]"
+                  >
+                    <span :class="['pqc-agent-dot', step.status]"></span>
+                    <span class="pqc-agent-role">{{ step.agentLabel }}</span>
+                    <span class="pqc-agent-summary">{{ step.summary }}</span>
+                    <span v-if="step.durationMs" class="pqc-agent-dur">{{ step.durationMs }}ms</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ---------- 详细讲解 ---------- -->
+              <div class="pqc-report-section">
+                <h4 class="pqc-section-title">📖 详细讲解</h4>
+                <div class="pqc-analysis-content" v-html="renderMixedHtml(evaluationReport.analysis)" />
+              </div>
+
+              <!-- ---------- 分步评测要点 ---------- -->
+              <div class="pqc-report-section">
+                <h4 class="pqc-section-title">🔍 分步评测要点</h4>
+                <ul class="pqc-report-highlights">
+                  <li
+                    v-for="(item, hi) in evaluationReport.highlights"
+                    :key="hi"
+                    :class="['pqc-hl-item', item.startsWith('✅') ? 'hl-good' : item.startsWith('⚠️') ? 'hl-warn' : 'hl-tip']"
+                  >
+                    {{ item }}
+                  </li>
+                </ul>
+              </div>
+
+              <!-- ---------- 文档溯源引用 ---------- -->
+              <div v-if="evaluationReport.sourceRefs.length > 0" class="pqc-report-section">
+                <h4 class="pqc-section-title">📚 评测依据 · 文档溯源</h4>
+                <div class="pqc-source-grid">
+                  <div
+                    v-for="ref in evaluationReport.sourceRefs"
+                    :key="ref.refId"
+                    class="pqc-source-card"
+                  >
+                    <div class="pqc-source-head">
+                      <span class="pqc-source-badge">[{{ ref.refId }}]</span>
+                      <span class="pqc-source-doc">{{ ref.documentName }}</span>
+                      <span class="pqc-source-page">第 {{ ref.pageNumber }} 页</span>
+                    </div>
+                    <blockquote class="pqc-source-excerpt">
+                      "{{ ref.excerpt }}"
+                    </blockquote>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </template>
@@ -486,16 +1023,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                 <!-- 气泡 -->
                 <div class="msg-body">
                   <div :class="['bubble', msg.role, { refusal: msg.isRefusal }]">
-                    <p v-for="(line, li) in msg.content.split('\n')" :key="li" class="bubble-line">
-                      <template
-                        v-for="(token, ti) in tokenizeMarkdownLine(line)"
-                        :key="`${li}-${ti}`"
-                      >
-                        <strong v-if="token.type === 'strong'">{{ token.content }}</strong>
-                        <code v-else-if="token.type === 'code'" class="inline-code">{{ token.content }}</code>
-                        <template v-else>{{ token.content }}</template>
-                      </template>
-                    </p>
+                    <p v-for="(line, li) in msg.content.split('\n')" :key="li" class="bubble-line" v-html="renderMarkdownLine(line)" />
                     <!-- 附件标签（仅 user 消息） -->
                     <div v-if="msg.role === 'user' && msg.attachments && msg.attachments.length > 0" class="msg-attachments">
                       <span v-for="att in msg.attachments" :key="att.localId" class="msg-att-tag">
@@ -641,6 +1169,20 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
   </div>
 </template>
 
+<script lang="ts">
+// ============================================================
+// 简易 Markdown 行内渲染（不引入外部依赖）
+// ============================================================
+export function renderMarkdownLine(line: string): string {
+  let html = line
+    // 粗体
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // 行内代码
+    .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+  return html
+}
+</script>
+
 <style scoped>
 /* ============================================================
    CSS 变量
@@ -655,7 +1197,10 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
   --drawer-w: 380px;
 
   position: fixed;
-  inset: 0;
+  top: var(--nav-height, 48px);
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
   background: var(--bg);
   color: var(--text);
@@ -1080,77 +1625,343 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
 }
 
 .wrongbook-inner {
-  max-width: 760px;
+  max-width: 780px;
   margin: 0 auto;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
+/* ---- 空状态 ---- */
+.wrongbook-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  text-align: center;
+}
+
+.wrongbook-empty-icon {
+  width: 72px;
+  height: 72px;
+  margin-bottom: 18px;
+}
+
+.wrongbook-empty-title {
+  font-family: var(--heading);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 8px;
+}
+
+.wrongbook-empty-desc {
+  font-size: 14px;
+  color: var(--text);
+  max-width: 420px;
+  line-height: 1.6;
+  margin: 0;
+  opacity: 0.6;
+}
+
+/* ---- 错题卡片（暗色系列）---- */
 .wrongbook-card {
-  padding: 18px 20px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border, #2e303a);
   border-radius: 12px;
-  background: var(--code-bg);
+  background: var(--code-bg, #1f2028);
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-.wb-status {
-  display: inline-block;
+.wrongbook-card:hover {
+  border-color: var(--accent-border, rgba(192, 132, 252, 0.35));
+}
+
+.wrongbook-card.expanded {
+  border-color: var(--accent-border, rgba(192, 132, 252, 0.55));
+  box-shadow: 0 0 0 3px var(--accent-bg, rgba(170, 59, 255, 0.06));
+}
+
+/* ---- 折叠行 ---- */
+.wb-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wb-card-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.wb-chapter-tag {
   font-size: 11px;
   font-weight: 700;
-  padding: 2px 10px;
-  border-radius: 10px;
-  margin-bottom: 10px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--accent-bg, rgba(170, 59, 255, 0.1));
+  color: var(--accent, #aa3bff);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.wb-status.pending {
-  background: rgba(239, 68, 68, 0.12);
-  color: #ef4444;
+.wb-question-brief {
+  font-size: 13.5px;
+  color: var(--text-h, #f3f4f6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
-.wb-status.reviewing {
-  background: rgba(245, 158, 11, 0.12);
-  color: #f59e0b;
+.wb-card-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
-.wb-status.mastered {
+.wb-score-pill {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.wb-score-pill.wb-score-high {
   background: rgba(52, 211, 153, 0.12);
   color: #34d399;
 }
 
-.wb-question {
-  font-size: 15px;
-  color: var(--text-h);
-  margin: 0 0 12px;
-  line-height: 1.65;
+.wb-score-pill.wb-score-mid {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
 }
 
-.wb-meta {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--text);
-  margin-bottom: 12px;
+.wb-score-pill.wb-score-low {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
 }
 
-.wb-source {
+.wb-score-pill-lg {
+  font-size: 18px;
+  padding: 4px 14px;
+  border-radius: 10px;
+}
+
+.wb-score-sep {
+  opacity: 0.45;
+  font-weight: 400;
+  margin: 0 1px;
+}
+
+.wb-time {
+  font-size: 11px;
+  color: var(--text, #6b6375);
+  opacity: 0.55;
+  white-space: nowrap;
+}
+
+.wb-chevron {
+  width: 18px;
+  height: 18px;
+  color: var(--text, #6b6375);
+  opacity: 0.45;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.wb-chevron.open {
+  transform: rotate(180deg);
   opacity: 0.7;
 }
 
-.wb-kp {
-  color: var(--accent);
+/* ---- 展开详情 ---- */
+.wb-card-detail {
+  padding: 4px 18px 18px;
+  border-top: 1px solid var(--border, #2e303a);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: wb-fade-in 0.2s ease;
 }
 
-.wb-count {
-  color: #f87171;
+@keyframes wb-fade-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.wb-detail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-detail-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-h, #f3f4f6);
+  margin: 0;
+}
+
+.wb-detail-content {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text-h, #f3f4f6);
+  padding: 12px 16px;
+  background: var(--bg, #16171d);
+  border-radius: 8px;
+  border: 1px solid var(--border, #2e303a);
+}
+
+/* KaTeX 公式在详情区内的微调 */
+.wb-detail-content :deep(.katex-display) {
+  margin: 10px 0;
+}
+
+.wb-detail-content :deep(.katex) {
+  font-size: 1.05em;
+}
+
+.wb-detail-content :deep(.katex-error) {
+  color: #fca5a5 !important;
+  border-bottom-color: #fca5a5;
+}
+
+.wb-detail-score-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wb-detail-score-label {
+  font-size: 13px;
   font-weight: 600;
+  color: var(--text, #9ca3af);
 }
 
-.wb-actions {
+.wb-detail-highlights {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wb-detail-highlights .pqc-hl-item {
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+
+.wb-detail-highlights .pqc-hl-item.hl-good {
+  background: rgba(52, 211, 153, 0.08);
+  color: #34d399;
+}
+
+.wb-detail-highlights .pqc-hl-item.hl-warn {
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+}
+
+.wb-detail-highlights .pqc-hl-item.hl-tip {
+  background: rgba(96, 165, 250, 0.08);
+  color: #93c5fd;
+}
+
+.wb-detail-actions {
   display: flex;
   gap: 8px;
+  padding-top: 4px;
+}
+
+/* 深色模式 */
+@media (prefers-color-scheme: dark) {
+  .wrongbook-card {
+    background: var(--code-bg, #1f2028);
+    border-color: var(--border, #2e303a);
+  }
+
+  .wrongbook-card.expanded {
+    border-color: rgba(192, 132, 252, 0.45);
+  }
+
+  .wb-detail-content {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+  }
+
+  .wrongbook-empty-icon [stroke],
+  .wrongbook-empty-icon [fill] {
+    /* SVG 继承 CSS 变量 */
+  }
+}
+
+/* 移动端 */
+@media (max-width: 768px) {
+  .wrongbook-inner {
+    max-width: 100%;
+    padding: 14px 12px;
+    gap: 8px;
+  }
+
+  .wb-card-row {
+    padding: 12px 14px;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .wb-card-left {
+    flex: 2;
+  }
+
+  .wb-card-right {
+    gap: 8px;
+  }
+
+  .wb-question-brief {
+    font-size: 12.5px;
+  }
+
+  .wb-score-pill {
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+
+  .wb-card-detail {
+    padding: 4px 14px 16px;
+    gap: 12px;
+  }
+
+  .wb-detail-content {
+    font-size: 13px;
+    padding: 10px 12px;
+  }
+
+  .wrongbook-empty {
+    padding: 40px 16px;
+  }
+
+  .wrongbook-empty-title {
+    font-size: 18px;
+  }
+
+  .wrongbook-empty-desc {
+    font-size: 13px;
+    max-width: 100%;
+  }
 }
 
 /* --- 专项训练占位 --- */
@@ -1192,6 +2003,585 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
+}
+
+/* --- 专项训练 — 答题阶段 --- */
+.practice-session {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.practice-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.practice-session-tag {
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 600;
+  padding: 4px 12px;
+  background: var(--accent-bg);
+  border-radius: 6px;
+}
+
+/* 答题主体：flex 列布局，编辑器 / 提交按钮 / 评测报告自然流式排布 */
+.practice-session-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  padding-bottom: 24px;
+}
+
+.pqc-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.pqc-num {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-h);
+}
+
+.pqc-type {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--text);
+}
+
+.pqc-prompt {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-h);
+  margin: 0;
+  padding: 14px 18px;
+  background: var(--code-bg);
+  border-radius: 10px;
+  border-left: 3px solid var(--accent);
+  flex-shrink: 0;
+}
+
+
+/* ---- 提交按钮（流式排布，不脱离文档流）---- */
+
+.pqc-submit-area {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ---- 评测报告（流式排布，无绝对定位 / 负 margin）---- */
+
+.pqc-report {
+  padding: 24px 28px;
+  border-radius: 14px;
+  background: var(--code-bg, #f4f3ec);
+  border: 1px solid var(--accent-border, rgba(170, 59, 255, 0.3));
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ---- 得分仪表区 ---- */
+
+.pqc-report-hero {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.pqc-score-gauge {
+  flex-shrink: 0;
+}
+
+.pqc-gauge-svg {
+  width: 120px;
+  height: 120px;
+  display: block;
+}
+
+.pqc-gauge-arc {
+  transition: stroke-dasharray 0.8s ease;
+}
+
+.pqc-gauge-score {
+  font-size: 28px;
+  font-weight: 800;
+  fill: var(--text-h, #08060d);
+}
+
+.pqc-gauge-label {
+  font-size: 12px;
+  fill: var(--text, #6b6375);
+  opacity: 0.7;
+}
+
+.pqc-score-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.pqc-grade-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  font-size: 18px;
+  font-weight: 700;
+  padding: 6px 18px;
+  border-radius: 10px;
+}
+
+.pqc-grade-badge.grade-high {
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+}
+
+.pqc-grade-badge.grade-mid {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+}
+
+.pqc-grade-badge.grade-low {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+}
+
+/* ---- 置信度 ---- */
+
+.pqc-confidence {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pqc-conf-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text, #6b6375);
+  white-space: nowrap;
+}
+
+.pqc-conf-bar-track {
+  flex: 1;
+  max-width: 140px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border, #e5e4e7);
+  overflow: hidden;
+}
+
+.pqc-conf-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent, #aa3bff);
+  transition: width 0.6s ease;
+}
+
+.pqc-conf-pct {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent, #aa3bff);
+  font-family: var(--mono);
+}
+
+/* ---- 报告分区 ---- */
+
+.pqc-report-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pqc-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-h, #08060d);
+  margin: 0;
+}
+
+/* ---- Agent 分步反馈 ---- */
+
+.pqc-agent-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pqc-agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, #e5e4e7);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: border-color 0.2s;
+}
+
+.pqc-agent-chip.succeeded {
+  border-left: 3px solid #34d399;
+}
+
+.pqc-agent-chip.running {
+  border-left: 3px solid var(--accent, #aa3bff);
+}
+
+.pqc-agent-chip.failed {
+  border-left: 3px solid #f87171;
+}
+
+.pqc-agent-chip.idle {
+  border-left: 3px solid var(--border, #e5e4e7);
+  opacity: 0.55;
+}
+
+.pqc-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pqc-agent-dot.succeeded { background: #34d399; }
+.pqc-agent-dot.running { background: var(--accent, #aa3bff); animation: pulse 1.2s infinite; }
+.pqc-agent-dot.failed { background: #f87171; }
+.pqc-agent-dot.idle { background: var(--border, #e5e4e7); }
+
+.pqc-agent-role {
+  font-weight: 700;
+  color: var(--text-h, #08060d);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.pqc-agent-summary {
+  color: var(--text, #6b6375);
+  flex: 1;
+  min-width: 0;
+}
+
+.pqc-agent-dur {
+  font-size: 11px;
+  color: var(--text, #6b6375);
+  opacity: 0.5;
+  font-family: var(--mono);
+  flex-shrink: 0;
+}
+
+/* ---- 详细讲解文本 ---- */
+
+.pqc-analysis-content {
+  font-size: 14.5px;
+  line-height: 1.85;
+  color: var(--text-h, #08060d);
+  padding: 14px 18px;
+  background: var(--bg, #fff);
+  border-radius: 10px;
+  border: 1px solid var(--border, #e5e4e7);
+}
+
+.pqc-analysis-content :deep(.katex-display) {
+  margin: 10px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.pqc-analysis-content :deep(.katex) {
+  font-size: 1.05em;
+}
+
+.pqc-analysis-content :deep(.katex-error) {
+  color: #dc2626 !important;
+  border-bottom: 1px dashed #dc2626;
+}
+
+.pqc-report-highlights {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pqc-hl-item {
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+
+.pqc-hl-item.hl-good {
+  background: rgba(34, 197, 94, 0.08);
+  color: #16a34a;
+}
+
+.pqc-hl-item.hl-warn {
+  background: rgba(245, 158, 11, 0.08);
+  color: #d97706;
+}
+
+.pqc-hl-item.hl-tip {
+  background: rgba(59, 130, 246, 0.08);
+  color: #2563eb;
+}
+
+/* ---- 文档溯源引用卡片 ---- */
+
+.pqc-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.pqc-source-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 10px;
+  background: var(--bg, #fff);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.2s;
+}
+
+.pqc-source-card:hover {
+  border-color: var(--accent-border, rgba(170, 59, 255, 0.4));
+}
+
+.pqc-source-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pqc-source-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--accent, #aa3bff);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.pqc-source-doc {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-h, #08060d);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pqc-source-page {
+  font-size: 11px;
+  color: var(--accent, #aa3bff);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.pqc-source-excerpt {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--code-bg, #f4f3ec);
+  border-left: 3px solid var(--accent-border, rgba(170, 59, 255, 0.4));
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--text, #6b6375);
+  line-height: 1.6;
+  font-style: italic;
+}
+
+/* 答题区深色模式 */
+@media (prefers-color-scheme: dark) {
+  .pqc-prompt {
+    background: var(--code-bg, #1f2028);
+  }
+
+  .pqc-report {
+    background: var(--code-bg, #1f2028);
+    border-color: var(--accent-border, rgba(192, 132, 252, 0.4));
+  }
+
+  .pqc-gauge-score {
+    fill: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-gauge-label {
+    fill: var(--text, #9ca3af);
+  }
+
+  .pqc-section-title {
+    color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-agent-chip {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+  }
+
+  .pqc-agent-role {
+    color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-agent-summary {
+    color: var(--text, #9ca3af);
+  }
+
+  .pqc-analysis-content {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+    color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-analysis-content :deep(.katex-error) {
+    color: #fca5a5 !important;
+    border-bottom-color: #fca5a5;
+  }
+
+  .pqc-hl-item.hl-good {
+    background: rgba(34, 197, 94, 0.1);
+    color: #4ade80;
+  }
+
+  .pqc-hl-item.hl-warn {
+    background: rgba(245, 158, 11, 0.1);
+    color: #fbbf24;
+  }
+
+  .pqc-hl-item.hl-tip {
+    background: rgba(96, 165, 250, 0.1);
+    color: #93c5fd;
+  }
+
+  .pqc-source-card {
+    background: var(--bg, #16171d);
+    border-color: var(--border, #2e303a);
+  }
+
+  .pqc-source-doc {
+    color: var(--text-h, #f3f4f6);
+  }
+
+  .pqc-source-excerpt {
+    background: var(--code-bg, #1f2028);
+    color: var(--text, #9ca3af);
+  }
+
+}
+
+/* 答题区响应式：中等屏幕 → 双栏变堆叠 */
+@media (max-width: 1024px) {
+  .practice-session-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .pqc-prompt {
+    font-size: 14px;
+    padding: 12px 14px;
+  }
+
+  /* 评测报告 */
+  .pqc-report {
+    padding: 18px 20px;
+    gap: 18px;
+  }
+
+  .pqc-report-hero {
+    gap: 18px;
+  }
+
+  .pqc-source-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 答题区响应式：手机端 → 进一步压缩间距 */
+@media (max-width: 768px) {
+  /* 评测报告移动端 */
+  .pqc-report {
+    padding: 14px 16px;
+    gap: 14px;
+  }
+
+  .pqc-report-hero {
+    gap: 14px;
+  }
+
+  .pqc-gauge-svg {
+    width: 90px;
+    height: 90px;
+  }
+
+  .pqc-gauge-score {
+    font-size: 22px;
+  }
+
+  .pqc-grade-badge {
+    font-size: 15px;
+    padding: 4px 14px;
+  }
+
+  .pqc-agent-chip {
+    padding: 8px 10px;
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .pqc-agent-role {
+    font-size: 11px;
+  }
+
+  .pqc-agent-summary {
+    font-size: 11px;
+  }
+
+  .pqc-analysis-content {
+    font-size: 13.5px;
+    padding: 10px 14px;
+  }
+
+  .pqc-source-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .pqc-source-card {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .pqc-source-excerpt {
+    font-size: 11.5px;
+    padding: 8px 10px;
+  }
 }
 
 /* --- 消息区 --- */
@@ -2162,16 +3552,6 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
     margin-top: 4px;
     font-size: 10px;
     text-align: center;
-  }
-
-  /* ---- 错题本视图 ---- */
-  .wrongbook-inner {
-    max-width: 100%;
-    padding: 14px 12px;
-  }
-
-  .wb-meta {
-    gap: 10px;
   }
 
   /* ---- 专项训练占位 ---- */

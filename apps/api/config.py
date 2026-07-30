@@ -28,9 +28,9 @@ class Settings(BaseSettings):
 
     # ---- 嵌入 ----
     embedding_provider: str = "api"
-    embedding_model: str = ""
     embedding_api_base: str = ""
     embedding_api_key: str = ""
+    embedding_model: str = ""
 
     # ---- 文件 ----
     files_root: str = "/data/files"
