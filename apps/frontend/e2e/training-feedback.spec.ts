@@ -23,48 +23,21 @@ import { test, expect, type Page, type Locator } from '@playwright/test'
  * 选择 Element Plus <el-select> 的某个选项。
  *
  * Element Plus 2.x 将下拉菜单 teleport 到 <body> 末尾，
- * 打开/关闭有 CSS 过渡动画，因此必须等待选项可见后才能点击。
+ * 使用标准 Playwright 点击路径：点击 wrapper 打开下拉 → 等待选项 → 点击选项。
  */
 async function selectElOption(page: Page, select: Locator, optionText: string) {
-  // === 背景 ===
-  // Home.vue 的 .home-shell 使用 position:fixed;inset:0，从 y=0 开始。
-  // App.vue 的 <nav class="app-nav"> 高度 48px，z-index:100，覆盖在 .home-shell 上方。
-  // 位于 .chat-header 中的 .header-select 被导航栏遮挡，
-  // Playwright 的 pointer-events 检查会持续重试直到超时。
-  //
-  // === 方案 ===
-  // 使用 page.evaluate 在浏览器上下文中直接调用原生 DOM click()，
-  // 完全绕过 Playwright 的可见性/pointer-events 检查。
-  // Element Plus 的 <el-select> 在 .el-select__wrapper 上绑定点击事件。
-
-  // 1. 用原生 JS 点击 select wrapper 打开下拉
-  const selectId = await select.evaluate((el) => {
-    const wrapper = el.querySelector('.el-select__wrapper') as HTMLElement | null
-    if (wrapper) {
-      wrapper.click()
-      return wrapper.getAttribute('aria-describedby') || ''
-    }
-    // fallback: click the root
-    ;(el as HTMLElement).click()
-    return ''
-  })
+  // 1. 点击 select wrapper 打开下拉
+  await select.locator('.el-select__wrapper').click()
 
   // 2. 等待下拉渲染（Element Plus teleport + Vue nextTick）
-  await page.waitForTimeout(400)
+  const option = page.locator('.el-select-dropdown__item', { hasText: optionText }).last()
+  await option.waitFor({ state: 'visible', timeout: 5_000 })
 
-  // 3. 用原生 JS 点击目标选项
-  await page.evaluate((text: string) => {
-    const items = document.querySelectorAll('.el-select-dropdown__item')
-    for (const item of items) {
-      if (item.textContent?.includes(text)) {
-        ;(item as HTMLElement).click()
-        return
-      }
-    }
-  }, optionText)
+  // 3. 点击目标选项
+  await option.click()
 
-  // 4. 等待下拉关闭
-  await page.waitForTimeout(400)
+  // 4. 等待下拉关闭动画完成
+  await page.waitForTimeout(300)
 }
 
 /**

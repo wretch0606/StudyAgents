@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from apps.api.db.base import Base, created_at_col, pk
+from apps.api.db.base import Base, created_at_col, pk, updated_at_col
 
 
 class AgentRun(Base):
     __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint("trace_id", name="uq_agent_runs_trace_id"),
+    )
 
     id: Mapped[str] = pk()
     thread_id: Mapped[str] = mapped_column(
@@ -21,7 +24,7 @@ class AgentRun(Base):
     )
     mode: Mapped[str] = mapped_column(String(16), nullable=False)  # qa | practice
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="queued"
+        String(32), nullable=False, default="queued", index=True
     )
     prompt_version: Mapped[str] = mapped_column(String(64), nullable=True)
     model: Mapped[str] = mapped_column(String(128), nullable=True)
@@ -31,9 +34,28 @@ class AgentRun(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     estimated_cost_cny: Mapped[float] = mapped_column(default=0.0)
     error: Mapped[str] = mapped_column(Text, nullable=True)
+    # --- New fields (004_chat_persistence) ---
+    trace_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    run_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="qa", index=True
+    )
+    last_successful_node: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    checkpoint_ref: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
+    timing: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     started_at: Mapped[str] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[str] = mapped_column(DateTime, nullable=True)
     created_at = created_at_col()
+    updated_at = updated_at_col()
 
     def __repr__(self) -> str:
         return f"<AgentRun id={self.id} mode={self.mode} status={self.status}>"

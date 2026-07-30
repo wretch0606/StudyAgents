@@ -1,0 +1,1 @@
+{"case_id":"db-001","metric":"answer","arbiter_id":"A","judgment":"fail","reason":"示例行；仅在两名首轮标注者结论冲突时填写，并记录证据依据。"}

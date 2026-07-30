@@ -8,6 +8,7 @@ from tests.evaluation.evaluate import (
     load_json,
     load_jsonl,
     validate_annotations,
+    validate_arbitrations,
     validate_cases,
     validate_manifest,
     validate_results,
@@ -118,6 +119,84 @@ class EvaluationDatasetTests(unittest.TestCase):
         self.assertGreaterEqual(len(defects), 50)
         self.assertTrue(all(defect["reproduction_steps"] for defect in defects))
 
+    def test_arbitration_resolves_a_disagreement_and_records_failure(self):
+        case = dict(next(case for case in self.cases if case["case_id"] == "db-001"))
+        case["critical"] = True
+        results = [
+            {
+                "case_id": case["case_id"],
+                "actual_behavior": case["expected_behavior"],
+                "retrieved_evidence": [
+                    {
+                        "document_id": expected["document_id"],
+                        "page": page,
+                        "rank": rank,
+                    }
+                    for expected in case["expected_evidence"]
+                    for rank, page in enumerate(expected["pages"], start=1)
+                ],
+                "latency_ms": 1000,
+                "trace_id": "trace-arbitration",
+            }
+        ]
+        annotations = [
+            {
+                "case_id": case["case_id"],
+                "annotator_id": "B",
+                "judgments": {
+                    "answer": "pass",
+                    "citation": "pass",
+                    "refusal": "na",
+                    "grading": "na",
+                },
+                "notes": "",
+            },
+            {
+                "case_id": case["case_id"],
+                "annotator_id": "E",
+                "judgments": {
+                    "answer": "fail",
+                    "citation": "pass",
+                    "refusal": "na",
+                    "grading": "na",
+                },
+                "notes": "",
+            },
+        ]
+        arbitrations = [
+            {
+                "case_id": case["case_id"],
+                "metric": "answer",
+                "arbiter_id": "A",
+                "judgment": "fail",
+                "reason": "Evidence does not support the answer.",
+            }
+        ]
+        manifest = {
+            "run_id": "arbitration-test",
+            "code_commit": "test-commit",
+            "material_commit": "test-material",
+            "models": {},
+            "prompt_versions": {},
+            "retrieval_parameters": {},
+        }
+
+        report, defects = build_report(
+            [case],
+            self.policy_document,
+            results,
+            annotations,
+            manifest,
+            arbitrations,
+        )
+
+        self.assertIn("状态：`FAIL`", report)
+        self.assertIn("已仲裁标注分歧：1 条", report)
+        self.assertFalse(any(defect["metric"] == "annotation" for defect in defects))
+        self.assertTrue(
+            any(defect["metric"] == "answer_accuracy" for defect in defects)
+        )
+
     def test_templates_are_valid_json_or_jsonl(self):
         template_dir = DEFAULT_CASES.parent / "templates"
         manifest = json.loads(
@@ -131,6 +210,12 @@ class EvaluationDatasetTests(unittest.TestCase):
         self.assertEqual(
             len(load_jsonl(template_dir / "annotations.example.jsonl")),
             2,
+        )
+        arbitrations = load_jsonl(template_dir / "arbitrations.example.jsonl")
+        self.assertEqual(len(arbitrations), 1)
+        self.assertEqual(
+            validate_arbitrations(arbitrations, {"db-001"}),
+            [],
         )
         for schema_path in DEFAULT_CASES.parent.glob("*.schema.json"):
             with self.subTest(schema=schema_path.name):

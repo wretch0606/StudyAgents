@@ -118,6 +118,13 @@ html, body, #app {
   max-width: none;
   border: none;
   text-align: left;
+  --nav-height: 48px;
+}
+
+@media (max-width: 768px) {
+  #app {
+    --nav-height: 42px;
+  }
 }
 </style>
 
@@ -127,6 +134,7 @@ html, body, #app {
    ============================================================ */
 
 .app-nav {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;

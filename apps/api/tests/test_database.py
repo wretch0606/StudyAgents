@@ -34,6 +34,10 @@ def test_all_models_registered_in_metadata() -> None:
         "agent_runs",
         "agent_events",
         "idempotency_records",
+        "documents",
+        "ingestion_jobs",
+        "chat_sessions",
+        "chat_messages",
     }
     missing = expected - set(table_names)
     assert not missing, f"以下表未注册到 metadata: {missing}"
