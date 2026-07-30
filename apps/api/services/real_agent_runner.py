@@ -80,13 +80,14 @@ class LangGraphAgentRunner:
             "user_answer": None,
         }
 
-        # 依赖注入（retriever 使用空实现，等待 B 接入后替换）
+        # 依赖注入（使用 B 提供的真实 HybridRetriever）
+        from apps.worker.retrieval.retriever import HybridRetriever
         config = {
             "configurable": {
                 "thread_id": f"thread-{_uuid.uuid4().hex[:16]}",
                 "model": model_gateway,
                 "event_sink": event_sink,
-                "retriever": _StubRetriever(),
+                "retriever": HybridRetriever(),
             }
         }
 
