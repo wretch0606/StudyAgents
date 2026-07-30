@@ -13,7 +13,7 @@
 // ============================================================
 
 import { defineStore } from 'pinia'
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 
 // ============================================================
 // 类型定义

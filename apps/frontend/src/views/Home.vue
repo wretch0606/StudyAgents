@@ -18,7 +18,7 @@ import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
 import { renderMixedHtml } from '../utils/katex-renderer'
-import { tokenizeMarkdownLine } from '../utils/markdown'
+
 
 // =========================================================
 // 聊天状态（Pinia Store）
@@ -1197,7 +1197,10 @@ export function renderMarkdownLine(line: string): string {
   --drawer-w: 380px;
 
   position: fixed;
-  inset: 0;
+  top: var(--nav-height, 48px);
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
   background: var(--bg);
   color: var(--text);
