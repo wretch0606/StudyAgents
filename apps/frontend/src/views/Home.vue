@@ -16,6 +16,7 @@ import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
+import { ElMessage } from 'element-plus'
 import { renderMixedHtml } from '../utils/katex-renderer'
 
 // =========================================================
@@ -478,6 +479,17 @@ async function handleSend() {
       .join('\n\n')
     fullInput = `${fileRefs}\n\n---\n\n${text}`
   }
+
+  // 4b. 校验 user_input 长度（后端限制 10000 字符，base64 编码后极易超限）
+  const MAX_INPUT_CHARS = 10_000
+  if (fullInput.length > MAX_INPUT_CHARS) {
+    ElMessage.warning(
+      `消息总长度 ${fullInput.length} 字符，超过后端限制 ${MAX_INPUT_CHARS} 字符。` +
+      '请缩短文本或移除附件后重新发送。',
+    )
+    return
+  }
+
   await chatStore.startQa(fullInput)
 
   // 5. 请求发送成功后，清空已发送的附件
@@ -556,10 +568,7 @@ function removeChatAttachment(localId: string) {
 const pdfUploading = ref(false)
 
 function handlePdfImport() {
-  pdfUploading.value = true
-  setTimeout(() => {
-    pdfUploading.value = false
-  }, 2000)
+  ElMessage.info('PDF 导入功能开发中，请通过管理后台的资料管理页上传文档')
 }
 
 // =========================================================

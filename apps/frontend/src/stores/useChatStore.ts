@@ -631,6 +631,16 @@ export const useChatStore = defineStore('chat', () => {
   async function pollForAssistantMessage(): Promise<void> {
     if (!currentSessionId.value) return
 
+    // 清理流式占位消息（临时 ID "stream-xxx"），避免与 API 拉取的持久化消息
+    // 产生重复气泡。必须放在 prevAssistantCount 之前执行——否则 streaming
+    // 消息被计入 prev 后又被移除，导致 count 比较永远不满足退出条件。
+    if (streamingMessageId.value) {
+      messages.value = messages.value.filter(
+        (m) => m.id !== streamingMessageId.value,
+      )
+      streamingMessageId.value = null
+    }
+
     // 记录轮询开始前已有的 assistant 消息数量，用于判断是否有新消息入库
     const prevAssistantCount = messages.value.filter(
       (m) => m.role === 'assistant' && m.content.trim().length > 0,
