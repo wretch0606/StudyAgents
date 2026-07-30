@@ -28,12 +28,13 @@ def grade_choice(user_answer: str, expected: str, max_score: int = 0) -> dict:
         {"score": int, "max_score": int, "confidence": 1.0, "met": bool}
     """
     score = max_score if user_answer.strip().upper() == expected.strip().upper() else 0
+    is_correct = user_answer.strip().upper() == expected.strip().upper()
     return {
         "score": score,
         "max_score": max_score,
         "confidence": 1.0,
-        "met": score > 0,
-        "feedback": "选项正确" if score > 0 else f"选项错误，正确答案为 {expected}",
+        "met": is_correct,
+        "feedback": "选项正确" if is_correct else f"选项错误，正确答案为 {expected}",
     }
 
 
