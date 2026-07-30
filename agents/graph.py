@@ -419,6 +419,31 @@ async def evaluator_qa_node(
     )
     answer: QAAnswer = result.output
 
+    # 【Day6 修复】引用准确率：检查 answer 中是否包含 citation 标记
+    import re as _re
+    _citation_in_text = _re.findall(r'\[.+?第\d+页\]', answer.answer)
+    _has_citations = len(_citation_in_text) >= 1
+    if not _has_citations and evidence:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("回答中缺少引用标记，重试一次")
+        _retry_msg = EVALUATOR_USER.format(
+            user_input=state.get("user_input", "") + "\n\n【重要提醒】在回答的每句话后面标注引用，格式：[文档名 第X页]。不要只在末尾列来源。",
+            knowledge_text=knowledge_text,
+            source_refs_text=source_refs_text,
+        )
+        _retry_msgs = _build_messages(EVALUATOR_SYSTEM, _retry_msg)
+        result = await model.invoke_structured(
+            run_id=state["run_id"],
+            trace_id=state.get("trace_id", state["run_id"]),
+            agent="evaluator",
+            prompt_version=PROMPT_VERSIONS["evaluator"],
+            messages=_retry_msgs,
+            output_schema=QAAnswer,
+            temperature=0.1,
+        )
+        answer = result.output
+        state["model_calls"] = state.get("model_calls", 0) + 1
+
     await _emit(
         state=state,
         agent="evaluator",
