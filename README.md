@@ -17,6 +17,153 @@
 - 支持专项训练、分步评分、讲解、错题本和掌握度更新。
 - 使用 Docker Compose 或统一脚本在答辩电脑复现。
 
+## 快速启动（Docker Compose）
+
+### 准备
+
+```bash
+# 1. 克隆仓库
+git clone <repo-url> && cd StudyAgents
+
+# 2. 创建环境文件
+cp .env.example .env
+# 编辑 .env，至少修改 SESSION_SECRET 和 INIT_DEFAULT_PASSWORD
+
+# 3. 确保 Docker 已安装并运行
+docker --version
+docker compose version
+```
+
+### 启动全部服务
+
+```bash
+# 构建镜像并启动（首次约 3-5 分钟）
+docker compose up -d --build
+
+# 查看服务状态
+docker compose ps
+```
+
+四个服务：`studyagents-postgres`、`studyagents-api`、`studyagents-worker`、`studyagents-frontend`
+
+### 数据库迁移
+
+```bash
+# 在隔离环境中执行迁移
+docker compose exec api alembic upgrade head
+
+# 验证迁移版本
+docker compose exec api alembic current
+```
+
+### 初始化账号
+
+```bash
+# 创建 1 admin + 4 member 共 5 个预置账号
+docker compose exec -e INIT_DEFAULT_PASSWORD=<your-password> api python scripts/init_users.py
+```
+
+默认账号：`admin`（管理员）、`member_a`、`member_b`、`member_c`、`member_d`（普通成员）
+
+### 健康检查
+
+```bash
+# API 健康检查
+curl http://localhost:8080/api/health/live
+
+# Worker 健康检查
+docker compose exec worker python -m apps.worker.main --check
+
+# 前端
+curl http://localhost:3000
+```
+
+### 访问
+
+| 服务 | 地址 |
+|------|------|
+| 前端 | http://localhost:3000 |
+| API | http://localhost:8080 |
+| API 文档（开发模式） | http://localhost:8080/api/docs |
+
+### 备份与恢复
+
+```bash
+# 备份（数据库 + 原始文件卷）
+uv run python scripts/backup.py
+# 产物: ./backups/backup_<timestamp>_<githash>.tar.gz + .sha256
+
+# 恢复（需要确认；--force 跳过提示）
+uv run python scripts/restore.py ./backups/backup_20260728_120000_abc12345.tar.gz
+uv run python scripts/restore.py --force --skip-files ./backups/backup_20260728_120000_abc12345.tar.gz
+```
+
+恢复流程：
+1. SHA-256 校验备份完整性
+2. 确认目标环境（生产恢复需要人工确认）
+3. `pg_restore --clean --if-exists` 恢复数据库
+4. 解包文件卷到 `FILES_ROOT`
+5. `alembic upgrade head` 迁移兼容检查
+6. `document_id ↔ SourceRef` 引用一致性检查
+
+索引/向量数据策略：**不备份** — 可通过重跑 ingestion pipeline 重建（`docker compose exec worker python -m apps.worker.main`）
+
+失败回滚：恢复前自动创建备份快照；若恢复失败，使用原备份包重新执行。
+
+### 查看日志
+
+```bash
+# 所有服务
+docker compose logs -f
+
+# 单个服务
+docker compose logs -f api
+docker compose logs -f worker
+docker compose logs -f frontend
+```
+
+### 停止
+
+```bash
+# 停止所有服务，保留数据卷
+docker compose down
+
+# 停止并删除数据卷（重置数据库和文件）
+docker compose down -v
+```
+
+### 故障定位
+
+```bash
+# 数据库连接
+docker compose exec postgres pg_isready -U studyagents -d studyagents
+
+# API 日志中搜索错误
+docker compose logs api | grep -i error
+
+# 查看迁移历史
+docker compose exec api alembic history
+
+# 进入容器调试
+docker compose exec api bash
+docker compose exec worker bash
+```
+
+### 实时模式 vs 演示缓存
+
+**实时模式**（默认，`.env` 不设或留空 `DEMO_CACHE_MODE=`）：调用真实模型，成功响应自动填充缓存。
+
+**演示缓存模式**（`.env` 设 `DEMO_CACHE_MODE=1`）：从缓存返回，不调用模型。所有 API/SSE 响应标记 `_demo: true`。
+
+```bash
+# 1. 实时模式运行一次，填充缓存
+DEMO_CACHE_MODE= docker compose up -d
+# 2. 断网/无 API Key 时切换到缓存模式
+DEMO_CACHE_MODE=1 docker compose up -d
+```
+
+缓存键包含 agent、prompt 版本、输入消息和筛选条件。缓存仅存储公开 DTO，拒绝含私有答案/评分点/Prompt/密钥的内容。
+
 ## 技术栈
 
 - 前端：Vue 3、TypeScript、Vite、Pinia、Vue Router、Element Plus、KaTeX

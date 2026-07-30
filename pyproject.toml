@@ -46,6 +46,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests", "apps/api/tests", "apps/worker/tests"]
 markers = [
     "real_db: test uses a real PostgreSQL database instead of in-memory fakes",

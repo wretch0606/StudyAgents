@@ -283,6 +283,7 @@ async def submit_answer(
         completed_at=now,
     )
     session.add(run)
+    await session.flush()  # 确保 run 先于 events 持久化
 
     # 写入两个最小事件：run.started + run.completed（SSE 历史回放 + 终态标记）
     summary = (

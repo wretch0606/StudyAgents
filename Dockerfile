@@ -16,6 +16,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # 复制源码
 COPY apps/ ./apps/
+COPY agents/ ./agents/
 COPY c/ ./c/
 COPY contracts/ ./contracts/
 
@@ -33,6 +34,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # 复制应用代码
 COPY apps/ ./apps/
+COPY agents/ ./agents/
 COPY c/ ./c/
 COPY contracts/ ./contracts/
 

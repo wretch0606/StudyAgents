@@ -97,15 +97,9 @@ class IngestionPipelineHandler:
     """把 D 的 WorkerTask 转换为 B 的完整导入管线调用。"""
 
     def __init__(self, pipeline=None) -> None:
-        if pipeline is None:
-            from apps.worker.ingestion.pipeline import IngestionPipeline
-
-            pipeline = IngestionPipeline(PipelineProgressRecorder())
         self.pipeline = pipeline
 
     async def handle(self, task: WorkerTask) -> WorkerResult:
-        from apps.worker.schemas import IngestionJob, IngestionStage, IngestionStatus
-
         document_id = str(task.payload.get("document_id", ""))
         file_path = str(task.payload.get("file_path", ""))
         if not document_id:
@@ -133,6 +127,43 @@ class IngestionPipelineHandler:
                 retryable=False,
             )
 
+        if self.pipeline is not None:
+            return await self._run_pipeline(
+                self.pipeline,
+                task,
+                document_id,
+                file_path,
+            )
+
+        from apps.api.db.session import session_context
+        from apps.worker.ingestion.pipeline import IngestionPipeline
+
+        async with session_context() as db_session:
+            pipeline = IngestionPipeline(
+                PipelineProgressRecorder(),
+                db_session=db_session,
+            )
+            result = await self._run_pipeline(
+                pipeline,
+                task,
+                document_id,
+                file_path,
+            )
+            if result.success:
+                await db_session.commit()
+            else:
+                await db_session.rollback()
+            return result
+
+    @staticmethod
+    async def _run_pipeline(
+        pipeline,
+        task: WorkerTask,
+        document_id: str,
+        file_path: str,
+    ) -> WorkerResult:
+        from apps.worker.schemas import IngestionJob, IngestionStage, IngestionStatus
+
         job = IngestionJob(
             job_id=task.task_id,
             document_id=document_id,
@@ -140,7 +171,7 @@ class IngestionPipelineHandler:
             status=IngestionStatus.RUNNING,
         )
         try:
-            await self.pipeline.run_to_completion(job, file_path)
+            await pipeline.run_to_completion(job, file_path)
         except (FileNotFoundError, ValueError) as exc:
             return WorkerResult(
                 task_id=task.task_id,

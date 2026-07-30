@@ -7,7 +7,9 @@ from apps.api.db.models.auth_session import AuthSession
 from apps.api.db.models.chat_message import ChatMessage
 from apps.api.db.models.chat_session import ChatSession
 from apps.api.db.models.document import Document
+from apps.api.db.models.document_page import DocumentPage
 from apps.api.db.models.grade_result import GradeResult
+from apps.api.db.models.knowledge_chunk import KnowledgeChunk
 from apps.api.db.models.idempotency import IdempotencyRecord
 from apps.api.db.models.ingestion_job import IngestionJob
 from apps.api.db.models.mastery_change_log import MasteryChangeLog
@@ -25,7 +27,9 @@ __all__ = [
     "ChatMessage",
     "ChatSession",
     "Document",
+    "DocumentPage",
     "GradeResult",
+    "KnowledgeChunk",
     "IdempotencyRecord",
     "IngestionJob",
     "MasteryChangeLog",
