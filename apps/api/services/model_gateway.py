@@ -111,9 +111,10 @@ class OpenAIAdapter:
         model: str | None = None,
         provider: str = "openai",
     ) -> None:
-        self.base_url = (base_url or settings.model_base_url).rstrip("/")
-        self.api_key = api_key or settings.model_api_key
-        self.model = model or settings.model_text_name
+        configured_base_url = settings.model_base_url if base_url is None else base_url
+        self.base_url = configured_base_url.rstrip("/")
+        self.api_key = settings.model_api_key if api_key is None else api_key
+        self.model = settings.model_text_name if model is None else model
         self.provider = provider
 
     async def invoke_structured(
@@ -129,7 +130,7 @@ class OpenAIAdapter:
         max_tokens: int | None = None,
     ) -> ModelCallResult[T]:
         """调用模型并返回结构化输出。包含重试、超时、JSON 修复。"""
-        if not self.base_url or not self.api_key:
+        if not self.base_url or not self.api_key or not self.model:
             raise ModelGatewayError(
                 "MODEL_CONFIG_MISSING",
                 "模型配置缺失：请设置 MODEL_BASE_URL 和 MODEL_API_KEY。",
