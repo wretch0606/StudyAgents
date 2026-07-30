@@ -10,7 +10,7 @@ AgentState — LangGraph 状态图中流转的状态对象。
 """
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 # ── 检索过滤条件 ────────────────────────────────────
 
