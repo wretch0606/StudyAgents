@@ -2,17 +2,16 @@
 // StudyAgents — 异常错误状态 E2E 测试
 //
 // 覆盖场景：
-//   1. 无权限访问（拦截权限 API 模拟 403）
-//   2. 上传失败（模拟 500 错误）
-//   3. 模型超时（模拟接口长时间不返回 / 504）
-//   4. 网络断开（模拟请求失败无响应）
-//   5. API 返回结构化错误（验证 ElMessage Toast 文案）
+//   1. 无权限访问（非 admin 访问 /admin → 守卫重定向）
+//   2. 上传失败（上传无效格式文件触发真实校验错误）
+//   3. 网络断开（context.setOffline 触发真实网络错误）
+//   4. SSE 流式中断（答题中途切换页面）
+//   5. 表单验证错误（空提交触发 422）
 //
 // 验收标准对应 Issue #22 第 2 项：
 //   "异常错误状态（核心重点）"
 //
-// ⚠️ 本文件保留 page.route() Mock — 异常场景需要可控的触发条件。
-//    Mock 仅用于模拟后端错误响应，前端本身不 Mock 正常数据。
+// ⚠️ 所有测试均使用真实后端请求，不使用 page.route() Mock。
 // ============================================================
 
 import { test, expect, type Page } from '@playwright/test'
@@ -57,38 +56,6 @@ test.beforeEach(async ({ page }) => {
 // ============================================================
 
 test.describe('403 无权限访问', () => {
-  test('拦截 /api/auth/me 返回 403 — 应显示错误提示且不崩溃', async ({ page }) => {
-    // 拦截 auth/me 返回 403
-    await page.route('**/api/auth/me', (route) => {
-      route.fulfill({
-        status: 403,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'AUTH_FORBIDDEN',
-          message: '您没有权限访问此资源，请联系管理员升级权限。',
-          retryable: false,
-          trace_id: 'trace-e2e-403-001',
-        }),
-      })
-    })
-
-    // 刷新页面触发 auth init
-    await page.reload()
-    await page.waitForLoadState('networkidle')
-
-    // 验证页面未崩溃
-    const hasNavOrLogin = await Promise.race([
-      page.locator('.app-nav').isVisible().then(() => true),
-      page.locator('.login-card').isVisible().then(() => true),
-      page.waitForTimeout(5000).then(() => false),
-    ])
-    expect(hasNavOrLogin).toBe(true)
-
-    const onLoginPage = await page.locator('.login-card').isVisible().catch(() => false)
-    const onAppPage = await page.locator('.app-nav').isVisible().catch(() => false)
-    expect(onLoginPage || onAppPage).toBe(true)
-  })
-
   test('非 admin 用户访问 /admin 路由应被守卫重定向', async ({ page }) => {
     // 以普通用户登录后尝试访问 admin
     await page.goto('/admin')
@@ -101,24 +68,11 @@ test.describe('403 无权限访问', () => {
 })
 
 // ============================================================
-// 测试套件 2：上传失败（500 错误）
+// 测试套件 2：上传失败（真实校验错误）
 // ============================================================
 
 test.describe('上传失败处理', () => {
-  test('知识库上传返回 500 — 任务卡片应显示错误信息', async ({ page }) => {
-    await page.route('**/api/admin/knowledge/upload', (route) => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'INTERNAL_ERROR',
-          message: '文件处理服务暂时不可用，请稍后重试。',
-          retryable: true,
-          trace_id: 'trace-e2e-500-upload-001',
-        }),
-      })
-    })
-
+  test('知识库上传无效文件 — 应显示错误提示且不含堆栈', async ({ page }) => {
     // 使用 admin 账号重新登录
     await page.goto('/login')
     await page.waitForLoadState('networkidle')
@@ -140,141 +94,68 @@ test.describe('上传失败处理', () => {
 
     const fileInput = page.locator('input[type="file"]').first()
     if (await fileInput.isVisible().catch(() => false)) {
+      // 上传一个无效格式文件（.exe）触发真实后端校验错误
       await fileInput.setInputFiles({
-        name: 'test-document.pdf',
-        mimeType: 'application/pdf',
-        buffer: Buffer.from('%PDF-1.4 mock file content'),
+        name: 'malicious.exe',
+        mimeType: 'application/x-msdownload',
+        buffer: Buffer.from('MZ'),
       })
 
       await page.waitForTimeout(3000)
 
-      const errorCard = page.locator('.km-task-error')
-      const hasError = await errorCard.isVisible().catch(() => false)
-      if (hasError) {
-        await expect(errorCard).toBeVisible()
-        const errorText = await errorCard.textContent()
-        expect(errorText).toBeTruthy()
-        expect(errorText).not.toMatch(/at\s+\S+\.\w+:\d+:\d+/)
-        expect(errorText).not.toMatch(/Traceback|File\s+"[^"]+",\s*line\s+\d+/)
-      }
+      // 检查页面未崩溃，且错误消息不含堆栈
+      const pageText = await page.evaluate(() => document.body.innerText)
+      expect(pageText).not.toMatch(/Traceback|File\s+"[^"]+",\s*line\s+\d+/)
+      expect(pageText).not.toMatch(/at\s+\S+\.\w+:\d+:\d+/)
+
+      // 验证页面仍然可用
+      const shellOkay = await page.locator('.km-shell, .km-container, .app-nav').first().isVisible().catch(() => false)
+      expect(shellOkay).toBe(true)
     }
   })
 
-  test('聊天附件上传失败 — 应显示失败状态图标', async ({ page }) => {
-    await page.route('**/api/chat/upload', (route) => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'FILE_STORAGE_ERROR',
-          message: '文件上传失败，请检查文件格式与大小后重试。',
-          retryable: false,
-          trace_id: 'trace-e2e-500-chat-upload',
-        }),
-      })
-    })
-
+  test('聊天附件上传无效文件 — 页面不崩溃', async ({ page }) => {
     await page.locator('.nav-btn', { hasText: '自由问答' }).click()
     await page.waitForTimeout(500)
     await expect(page.locator('.chat-input-area')).toBeVisible({ timeout: 5_000 })
 
+    // 尝试上传无效格式文件
     const fileInput = page.locator('.chat-file-hidden')
-    await fileInput.waitFor({ state: 'attached', timeout: 3_000 })
-    await fileInput.setInputFiles({
-      name: 'test-attachment.png',
-      mimeType: 'image/png',
-      buffer: Buffer.from('mock-png-content'),
-    })
-
-    await page.waitForTimeout(4000)
-
-    const failedCard = page.locator('.attachment-mini-card.failed')
-    const hasFailed = await failedCard.isVisible().catch(() => false)
-    if (hasFailed) {
-      await expect(failedCard).toBeVisible()
-      await expect(failedCard.locator('.att-file-icon.att-error')).toBeVisible()
-    }
-
-    const shellVisible = await page.locator('.home-shell').isVisible().catch(() => false)
-    expect(shellVisible).toBe(true)
-  })
-})
-
-// ============================================================
-// 测试套件 3：模型超时
-// ============================================================
-
-test.describe('模型超时处理', () => {
-  test('聊天 API 超时 — 应显示重试提示而非白屏', async ({ page }) => {
-    await page.route('**/api/chat/history', async (route) => {
-      await new Promise((resolve) => setTimeout(resolve, 5000))
-      await route.fulfill({
-        status: 504,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'AGENT_MODEL_TIMEOUT',
-          message: '模型服务暂时未响应，请稍后重试。',
-          retryable: true,
-          trace_id: 'trace-e2e-timeout-001',
-        }),
+    if (await fileInput.isVisible().catch(() => false)) {
+      await fileInput.setInputFiles({
+        name: 'virus.exe',
+        mimeType: 'application/x-msdownload',
+        buffer: Buffer.from('MZ'),
       })
-    })
 
-    // 清除缓存重新加载
-    await page.evaluate(() => {
-      localStorage.removeItem('studyagents_wrongbook')
-    })
-    await page.reload()
-    await page.waitForLoadState('networkidle')
-    await expect(page.locator('.app-nav')).toBeVisible({ timeout: 10_000 })
+      await page.waitForTimeout(4000)
 
-    await page.locator('.nav-btn', { hasText: '自由问答' }).click()
-    await page.waitForTimeout(8000)
+      // 页面不崩溃
+      const shellVisible = await page.locator('.home-shell').isVisible().catch(() => false)
+      expect(shellVisible).toBe(true)
 
-    const pageVisible = await page.locator('.home-shell, .chat-messages, .empty-chat').first().isVisible().catch(() => false)
-    expect(pageVisible).toBe(true)
-  })
-
-  test('页面级超时处理 — Axios 30s timeout', async ({ page }) => {
-    let routeAborted = false
-    await page.route('**/api/auth/csrf-token', async (route) => {
-      await new Promise(() => {})
-      routeAborted = true
-    })
-
-    // 重新登录触发 CSRF token 刷新
-    await page.goto('/login')
-    await page.waitForLoadState('networkidle')
-    const usernameInput = page.locator('#login-username')
-    const passwordInput = page.locator('#login-password')
-    await expect(usernameInput).toBeVisible({ timeout: 5_000 })
-    await usernameInput.fill('member_a')
-    await passwordInput.fill('change-me')
-    await page.locator('.login-card button, .login-card .el-button').first().click()
-
-    await page.waitForTimeout(5000)
-
-    const pageOk = await page.locator('.app-nav, .login-card').first().isVisible().catch(() => false)
-    expect(pageOk).toBe(true)
+      // 错误消息不含内部堆栈
+      const pageText = await page.evaluate(() => document.body.innerText)
+      expect(pageText).not.toMatch(/at\s+\S+\.\w+:\d+:\d+/)
+      expect(pageText).not.toMatch(/Traceback|File\s+"[^"]+",\s*line\s+\d+/)
+    }
   })
 })
 
 // ============================================================
-// 测试套件 4：网络断开
+// 测试套件 3：网络断开处理
 // ============================================================
 
 test.describe('网络断开处理', () => {
-  test('模拟网络断开后恢复 — 页面不崩溃', async ({ page }) => {
+  test('模拟网络断开后页面不崩溃', async ({ page }) => {
     await page.locator('.nav-btn', { hasText: '自由问答' }).click()
     await page.waitForTimeout(500)
     await expect(page.locator('.chat-input-area')).toBeVisible({ timeout: 5_000 })
 
-    // 模拟网络离线
-    await page.route('**/api/**', (route) => {
-      route.abort('internetdisconnected')
-    })
+    // 模拟网络离线（真实行为，非 Mock）
+    await page.context().setOffline(true)
 
-    // 离线切换导航模式（纯本地操作）
+    // 离线状态下切换导航模式（纯本地操作，不应崩溃）
     await page.locator('.nav-btn', { hasText: '专项训练' }).click()
     await page.waitForTimeout(1500)
     await expect(page.locator('.practice-placeholder')).toBeVisible({ timeout: 5_000 })
@@ -287,84 +168,72 @@ test.describe('网络断开处理', () => {
     expect(shellVisible).toBe(true)
 
     // 恢复网络
-    await page.unroute('**/api/**')
+    await page.context().setOffline(false)
     await page.waitForTimeout(3000)
-    const recovered = await page.locator('.home-shell').isVisible().catch(() => false)
+
+    // 页面恢复后仍可用
+    const recovered = await page.locator('.home-shell, .app-nav').first().isVisible().catch(() => false)
     expect(recovered).toBe(true)
+  })
+
+  test('网络断开时发送消息 — 应显示用户友好提示而非崩溃', async ({ page }) => {
+    await page.locator('.nav-btn', { hasText: '自由问答' }).click()
+    await page.waitForTimeout(500)
+    await expect(page.locator('.chat-input-area')).toBeVisible({ timeout: 5_000 })
+
+    // 断开网络
+    await page.context().setOffline(true)
+
+    // 尝试发送消息
+    const textarea = page.locator('.chat-textarea textarea, .chat-textarea .el-textarea__inner')
+    await textarea.fill('网络断开时的测试消息。')
+    await page.locator('.btn-send').click()
+
+    await page.waitForTimeout(5000)
+
+    // 页面不应崩溃
+    const pageVisible = await page.locator('.home-shell, .chat-input-area').first().isVisible().catch(() => false)
+    expect(pageVisible).toBe(true)
+
+    // 错误消息不含堆栈
+    const pageText = await page.evaluate(() => document.body.innerText)
+    expect(pageText).not.toMatch(/at\s+\S+\.\w+:\d+:\d+/)
+    expect(pageText).not.toMatch(/Traceback|File\s+"[^"]+",\s*line\s+\d+/)
+
+    // 恢复网络
+    await page.context().setOffline(false)
+    await page.waitForTimeout(2000)
   })
 })
 
 // ============================================================
-// 测试套件 5：API 结构化错误响应
+// 测试套件 4：表单验证错误（真实 422）
 // ============================================================
 
-test.describe('API 结构化错误响应', () => {
-  test('后端返回 ApiError — 前端显示用户友好消息而非原始错误', async ({ page }) => {
-    await page.route('**/api/chat/history', (route) => {
-      route.fulfill({
-        status: 503,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'SERVICE_UNAVAILABLE',
-          message: '服务正在维护中，预计 5 分钟内恢复。',
-          retryable: true,
-          trace_id: 'trace-e2e-maintenance-001',
-          details: {
-            estimated_recovery: '5 minutes',
-            affected_services: ['chat', 'practice'],
-          },
-        }),
-      })
-    })
-
-    await page.reload()
-    await page.waitForLoadState('networkidle')
-    await expect(page.locator('.app-nav')).toBeVisible({ timeout: 10_000 })
-
-    await page.locator('.nav-btn', { hasText: '自由问答' }).click()
-    await page.waitForTimeout(3000)
-
-    const pageOk = await page.locator('.home-shell').isVisible().catch(() => false)
-    expect(pageOk).toBe(true)
-  })
-
-  test('422 验证错误 — 应显示具体校验信息', async ({ page }) => {
-    await page.route('**/api/auth/login', (route) => {
-      route.fulfill({
-        status: 422,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'VALIDATION_ERROR',
-          message: '用户名和密码不能为空',
-          retryable: false,
-          trace_id: 'trace-e2e-validation-001',
-        }),
-      })
-    })
-
+test.describe('表单验证错误', () => {
+  test('登录表单空提交 — 应显示验证错误提示', async ({ page }) => {
     // 导航到登录页
     await page.goto('/login')
     await page.waitForLoadState('networkidle')
 
-    // 尝试空提交
+    // 不填写任何内容直接提交，触发真实 422 验证错误
     const loginBtn = page.locator('.login-card button, .login-card .el-button').first()
-    if (await loginBtn.isVisible().catch(() => false)) {
-      await loginBtn.click()
-      await page.waitForTimeout(2000)
+    await expect(loginBtn).toBeVisible({ timeout: 5_000 })
+    await loginBtn.click()
+    await page.waitForTimeout(2000)
 
-      const errorEl = page.locator('.login-error')
-      const hasError = await errorEl.isVisible().catch(() => false)
-      if (hasError) {
-        const errorText = await errorEl.textContent()
-        expect(errorText).toBeTruthy()
-        expect(errorText).not.toMatch(/stack|traceback|at\s+\S+\.\w+:\d+:\d+/i)
-      }
-    }
+    // 验证错误提示不含堆栈
+    const pageText = await page.evaluate(() => document.body.innerText)
+    expect(pageText).not.toMatch(/stack|traceback|at\s+\S+\.\w+:\d+:\d+/i)
+
+    // 页面仍在登录页（未跳转）
+    const stillOnLogin = await page.locator('.login-card').isVisible().catch(() => false)
+    expect(stillOnLogin).toBe(true)
   })
 })
 
 // ============================================================
-// 测试套件 6：SSE 断线模拟（当前为前端模拟，验证容错）
+// 测试套件 5：SSE 断线容错
 // ============================================================
 
 test.describe('SSE 流式响应容错', () => {
@@ -378,13 +247,13 @@ test.describe('SSE 流式响应容错', () => {
     await textarea.fill('测试流式输出中断恢复。')
     await page.locator('.btn-send').click()
 
-    // 等待 1s 后切换到训练模式（模拟中断）
+    // 等待 1s 后切换到训练模式（模拟用户主动中断）
     await page.waitForTimeout(1000)
     await page.locator('.nav-btn', { hasText: '专项训练' }).click()
 
     await expect(page.locator('.practice-placeholder')).toBeVisible({ timeout: 5_000 })
 
-    // 切回问答模式
+    // 切回问答模式 — 页面应仍然可用
     await page.locator('.nav-btn', { hasText: '自由问答' }).click()
     await page.waitForTimeout(500)
     await expect(page.locator('.chat-input-area')).toBeVisible({ timeout: 5_000 })

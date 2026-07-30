@@ -3,9 +3,9 @@
 //
 // 双轨制说明：
 //   - uploadKnowledgeBase(file)：管理员资料库上传
-//     → POST /api/admin/knowledge/upload (multipart/form-data)
+//     → POST /api/documents (multipart/form-data)
 //   - uploadChatAttachment(file)：问答附件上传
-//     → POST /api/chat/upload (multipart/form-data)
+//     → POST /api/documents (multipart/form-data)
 //
 // 两个链路职责严格分离：
 //   - 管理员上传 → 资料解析、切片、向量化、入库（长期存储）
@@ -15,10 +15,10 @@
 import http from '../utils/request'
 
 // ============================================================
-// 上传响应类型（Mock 阶段本地定义，后端对接后迁移到 api.ts）
+// 上传响应类型
 // ============================================================
 
-/** POST /api/admin/knowledge/upload 响应 */
+/** POST /api/documents 响应 */
 export interface KnowledgeUploadResponse {
   /** 资料文件唯一 ID */
   file_id: string
@@ -51,7 +51,7 @@ export async function uploadKnowledgeBase(
   formData.append('file', file)
 
   const response = await http.post<KnowledgeUploadResponse>(
-    '/admin/knowledge/upload',
+    '/documents',
     formData,
     {
       headers: {
@@ -76,7 +76,7 @@ export async function uploadChatAttachment(
   formData.append('file', file)
 
   const response = await http.post<ChatUploadResponse>(
-    '/chat/upload',
+    '/documents',
     formData,
     {
       headers: {

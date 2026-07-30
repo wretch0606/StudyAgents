@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // ============================================================
-// StudyAgents — 知识问答主界面（业务重构版）
+// StudyAgents — 知识问答主界面
 //
-// 核心差异点：
+// 核心功能：
 //   1. 左侧：专项训练 / 错题本入口 + 知识掌握度可视化
-//   2. 中间：PDF/OCR 导入入口 + 含拒答场景的 Mock 对话
+//   2. 中间：PDF/OCR 导入入口 + 实时 SSE 流式对话
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
@@ -32,6 +32,8 @@ const { messages, isStreaming, attachments, agentSteps } = storeToRefs(chatStore
 // ---- 页面挂载时发起网络请求获取对话历史 ----
 onMounted(() => {
   chatStore.fetchHistory()
+  loadHistoryList()
+  loadMasteryData()
 })
 
 // =========================================================
@@ -108,7 +110,18 @@ function startTraining() {
   isSubmitted.value = false
   evaluationReport.value = null
   trainingAnswer.value = ''
-  chatStore.initPracticeTraces()
+  // 调用真实后端创建训练会话（异步出题）
+  chatStore.createPracticeSession({
+    chapterIds: [selectedChapter.value],
+    questionTypes: [selectedType.value],
+    difficulty: selectedDifficulty.value,
+    count: Number(selectedCount.value) || 5,
+  }).then((result) => {
+    if (result) {
+      // 题目已由后端生成，更新当前题目版本号
+      console.log('[专项训练] 训练会话已创建:', result)
+    }
+  })
 }
 
 /** 返回章节选择 */
@@ -216,7 +229,7 @@ async function submitAnswer() {
   isEvaluating.value = true
 
   try {
-    const report = await chatStore.submitAnswerForEvaluation()
+    const report = await chatStore.submitPracticeAnswer(trainingAnswer.value)
     evaluationReport.value = report
     isSubmitted.value = true
 
@@ -304,7 +317,8 @@ function retryWrongQuestion(entry: WrongBookEntry) {
 }
 
 // =========================================================
-// 历史会话（Mock）
+// =========================================================
+// 历史会话（来自 GET /api/sessions）
 // =========================================================
 interface HistoryItem {
   id: string
@@ -312,18 +326,45 @@ interface HistoryItem {
   updatedAt: string
 }
 
-const historyList = ref<HistoryItem[]>([
-  { id: 'h1', title: 'TCP 三次握手与四次挥手详解', updatedAt: '10 分钟前' },
-  { id: 'h2', title: 'IP 子网划分与路由聚合', updatedAt: '2 小时前' },
-  { id: 'h3', title: 'HTTP/2 多路复用机制', updatedAt: '昨天' },
-  { id: 'h4', title: '操作系统进程调度算法', updatedAt: '昨天' },
-  { id: 'h5', title: '数据库索引 B+ 树结构', updatedAt: '3 天前' },
-])
+const historyList = ref<HistoryItem[]>([])
+const activeHistoryId = ref('')
 
-const activeHistoryId = ref('h1')
+/** 从后端加载会话历史列表 */
+async function loadHistoryList() {
+  try {
+    const resp = await fetch('/api/sessions')
+    if (!resp.ok) return
+    const data: { items: { id: string; title: string | null; updated_at: string }[] } = await resp.json()
+    historyList.value = data.items.map((s) => ({
+      id: s.id,
+      title: s.title || '未命名会话',
+      updatedAt: formatRelativeTime(s.updated_at),
+    }))
+    if (historyList.value.length > 0) {
+      activeHistoryId.value = historyList.value[0].id
+    }
+  } catch {
+    // 静默失败，保持空列表
+  }
+}
+
+function formatRelativeTime(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return '刚刚'
+  if (diffMin < 60) return `${diffMin} 分钟前`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr} 小时前`
+  const diffDay = Math.floor(diffHr / 24)
+  if (diffDay < 7) return `${diffDay} 天前`
+  return d.toLocaleDateString('zh-CN')
+}
 
 // =========================================================
-// 知识掌握度（Mock — 来自 GET /api/learning-summary）
+// =========================================================
+// 知识掌握度（来自 GET /api/learning-summary）
 // =========================================================
 interface MasteryRecord {
   kpId: string
@@ -331,15 +372,32 @@ interface MasteryRecord {
   mastery: number // 0–1
 }
 
-const masteryRecords = ref<MasteryRecord[]>([
-  { kpId: 'kp1', kpName: 'TCP 协议', mastery: 0.82 },
-  { kpId: 'kp2', kpName: 'IP 与路由', mastery: 0.65 },
-  { kpId: 'kp3', kpName: 'HTTP/HTTPS', mastery: 0.91 },
-  { kpId: 'kp4', kpName: '进程调度', mastery: 0.48 },
-  { kpId: 'kp5', kpName: 'B+ 树索引', mastery: 0.34 },
-])
+const masteryRecords = ref<MasteryRecord[]>([])
+const overallMastery = ref(0)
 
-const overallMastery = ref(0.64)
+/** 从后端加载知识掌握度 */
+async function loadMasteryData() {
+  try {
+    const resp = await fetch('/api/learning-summary')
+    if (!resp.ok) return
+    const data = await resp.json()
+    if (data.knowledge_points) {
+      masteryRecords.value = data.knowledge_points.map((kp: { knowledge_point_id: string; knowledge_point_name: string; mastery: number }) => ({
+        kpId: kp.knowledge_point_id,
+        kpName: kp.knowledge_point_name,
+        mastery: kp.mastery,
+      }))
+    }
+    if (data.overall_mastery != null) {
+      overallMastery.value = data.overall_mastery
+    } else if (masteryRecords.value.length > 0) {
+      const sum = masteryRecords.value.reduce((acc, r) => acc + r.mastery, 0)
+      overallMastery.value = Math.round((sum / masteryRecords.value.length) * 100) / 100
+    }
+  } catch {
+    // 静默失败，保持空状态
+  }
+}
 
 /** 错题本徽标数 — 动态响应 store 实际长度 */
 const pendingWrongCount = computed(() => wrongBookStore.count)
@@ -384,9 +442,8 @@ async function handleSend() {
   inputText.value = ''
   chatStore.clearAttachments()
 
-  // 3. 触发纯前端模拟的 SSE 流式打字机回复
-  //    （真实对接后替换为 EventSource / fetch 流读取）
-  await chatStore.simulateStreamingResponse()
+  // 3. 调用真实后端 SSE 流式问答
+  await chatStore.startQa(text)
 
   await nextTick()
   scrollToBottom()

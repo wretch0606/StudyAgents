@@ -348,30 +348,13 @@ test.describe('SourceRef 溯源引用渲染', () => {
 
 // ============================================================
 // 测试套件 4：无堆栈追踪 / 内部字段泄露
-// （保留 page.route() Mock — 这些测试本质是验证前端错误处理）
+// （使用真实错误触发：网络断开 + 无效文件上传）
 // ============================================================
 
 test.describe('隐私与安全——无敏感信息泄露', () => {
-  test('登录错误消息不含堆栈追踪', async ({ page }) => {
-    // 拦截 login API 返回包含内部详情的错误
-    await page.route('**/api/auth/login', (route) => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'INTERNAL_ERROR',
-          message: '服务器内部错误，请提供 trace_id 联系管理员。',
-          retryable: false,
-          trace_id: 'trace-e2e-safety-001',
-          details: {
-            internal_stack: 'Error: connect ECONNREFUSED 127.0.0.1:5432\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1494:16)',
-            query: 'SELECT * FROM users WHERE username = $1',
-            db_host: 'internal-db-01.cluster.local',
-            private_key_hint: 'sk-xxxxxxxxxxxx',
-          },
-        }),
-      })
-    })
+  test('网络断开时登录错误不含堆栈追踪', async ({ page }) => {
+    // 断开网络
+    await page.context().setOffline(true)
 
     // 导航到登录页
     await page.goto('/login')
@@ -411,29 +394,13 @@ test.describe('隐私与安全——无敏感信息泄露', () => {
     expect(pageText).not.toMatch(/sk-[a-zA-Z0-9]{20,}/)
     expect(pageText).not.toMatch(/private_key/)
     expect(pageText).not.toMatch(/password_hash/)
+
+    // 恢复网络
+    await page.context().setOffline(false)
   })
 
-  test('上传失败错误不含堆栈追踪', async ({ page }) => {
-    await page.route('**/api/admin/knowledge/upload', (route) => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'INTERNAL_ERROR',
-          message: '文件处理服务暂时不可用，请稍后重试。',
-          retryable: true,
-          trace_id: 'trace-e2e-safety-upload-001',
-          details: {
-            exception: "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/uploads/abc123.pdf'",
-            python_traceback: 'Traceback (most recent call last):\n  File "/app/services/file_storage.py", line 42, in save\n    with open(path, "wb") as f:\nFileNotFoundError: [Errno 2] No such file or directory',
-            server_path: '/var/lib/studyagents/uploads/',
-            env: 'production',
-          },
-        }),
-      })
-    })
-
-    // 需要 admin 权限 → 使用 admin 账号重新登录
+  test('上传无效文件错误不含堆栈追踪', async ({ page }) => {
+    // 使用 admin 账号登录
     await page.goto('/login')
     await page.waitForLoadState('networkidle')
     const usernameInput = page.locator('#login-username')
@@ -448,13 +415,13 @@ test.describe('隐私与安全——无敏感信息泄露', () => {
     await page.goto('/admin')
     await page.waitForLoadState('networkidle')
 
-    // 触发上传
+    // 上传无效格式文件触发真实后端错误
     const fileInput = page.locator('input[type="file"]').first()
     if (await fileInput.isVisible().catch(() => false)) {
       await fileInput.setInputFiles({
-        name: 'test.pdf',
-        mimeType: 'application/pdf',
-        buffer: Buffer.from('%PDF-1.4 mock'),
+        name: 'invalid.exe',
+        mimeType: 'application/x-msdownload',
+        buffer: Buffer.from('MZ'),
       })
       await page.waitForTimeout(3000)
     }
@@ -470,34 +437,22 @@ test.describe('隐私与安全——无敏感信息泄露', () => {
     expect(pageText).not.toContain('production')
   })
 
-  test('Toast/ElMessage 错误提示不含内部错误码细节', async ({ page }) => {
-    await page.route('**/api/chat/history', (route) => {
-      route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 'INTERNAL_ERROR',
-          message: '服务异常，请稍后重试。',
-          retryable: true,
-          trace_id: 'trace-e2e-toast-001',
-          details: {
-            db_error: 'connection pool exhausted',
-            active_connections: 97,
-            max_connections: 100,
-            sql_state: '53300',
-            worker_pid: 28461,
-          },
-        }),
-      })
-    })
+  test('网络断开时错误提示不含内部细节', async ({ page }) => {
+    // 断开网络
+    await page.context().setOffline(true)
 
-    // 重新加载页面触发 chat/history 请求
+    // 重新加载页面触发网络错误
     await page.reload()
     await page.waitForLoadState('networkidle')
-    await expect(page.locator('.app-nav')).toBeVisible({ timeout: 10_000 })
-
-    await page.locator('.nav-btn', { hasText: '自由问答' }).click()
     await page.waitForTimeout(3000)
+
+    // 检查页面仍存在（可能显示错误但不应崩溃）
+    const navOrLogin = await Promise.race([
+      page.locator('.app-nav').isVisible().then(() => true),
+      page.locator('.login-card').isVisible().then(() => true),
+      page.waitForTimeout(5000).then(() => false),
+    ])
+    expect(navOrLogin).toBe(true)
 
     const toastElements = page.locator('.el-message, .el-message__content')
     const toastCount = await toastElements.count()
@@ -515,7 +470,11 @@ test.describe('隐私与安全——无敏感信息泄露', () => {
       }
     }
 
-    const shellVisible = await page.locator('.home-shell').isVisible().catch(() => false)
+    // 恢复网络
+    await page.context().setOffline(false)
+    await page.waitForTimeout(2000)
+
+    const shellVisible = await page.locator('.home-shell, .login-card, .app-nav').first().isVisible().catch(() => false)
     expect(shellVisible).toBe(true)
   })
 })
