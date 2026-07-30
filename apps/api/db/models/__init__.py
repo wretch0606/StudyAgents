@@ -9,9 +9,9 @@ from apps.api.db.models.chat_session import ChatSession
 from apps.api.db.models.document import Document
 from apps.api.db.models.document_page import DocumentPage
 from apps.api.db.models.grade_result import GradeResult
+from apps.api.db.models.knowledge_chunk import KnowledgeChunk
 from apps.api.db.models.idempotency import IdempotencyRecord
 from apps.api.db.models.ingestion_job import IngestionJob
-from apps.api.db.models.knowledge_chunk import KnowledgeChunk
 from apps.api.db.models.mastery_change_log import MasteryChangeLog
 from apps.api.db.models.mastery_record import MasteryRecord
 from apps.api.db.models.practice_item import PracticeItem
@@ -29,9 +29,9 @@ __all__ = [
     "Document",
     "DocumentPage",
     "GradeResult",
+    "KnowledgeChunk",
     "IdempotencyRecord",
     "IngestionJob",
-    "KnowledgeChunk",
     "MasteryChangeLog",
     "MasteryRecord",
     "PracticeItem",

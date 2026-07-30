@@ -60,15 +60,37 @@ def create_app() -> FastAPI:
     app.include_router(wrong_book.router, prefix="/api")
     app.include_router(learning_summary.router, prefix="/api")
 
-    # ---- 初始化 AgentRunnerService（默认使用 FakeAgentRunner） ----
+    # ---- 初始化 Checkpointer（LangGraph 检查点持久化） ----
+    from apps.api.services.checkpointer import init_checkpointer
+
+    init_checkpointer()
+
+    # ---- 初始化 AgentRunnerService ----
     from apps.api.services.agent_event_sink import agent_event_sink
     from apps.api.services.agent_runner import init_agent_runner
 
-    init_agent_runner(
-        runner=None,  # None → uses FakeAgentRunner
-        model_gateway=None,  # None → uses FakeAdapter
-        event_sink=agent_event_sink,
-    )
+    # 根据环境选择真实或 Fake 组件
+    if settings.app_env in ("production", "staging") or settings.model_api_key:
+        # 生产环境或有 API Key → 使用真实组件
+        from apps.api.services.model_gateway import OpenAIAdapter
+        from apps.api.services.real_agent_runner import LangGraphAgentRunner
+
+        logger.info("Using real ModelGateway (OpenAIAdapter) + LangGraphAgentRunner")
+        init_agent_runner(
+            runner=LangGraphAgentRunner(),
+            model_gateway=OpenAIAdapter(),
+            event_sink=agent_event_sink,
+        )
+    else:
+        # 开发/测试环境无 API Key → 使用 Fake 组件
+        logger.warning(
+            "Using FakeAgentRunner + FakeAdapter — set MODEL_API_KEY for real AI"
+        )
+        init_agent_runner(
+            runner=None,  # None → FakeAgentRunner
+            model_gateway=None,  # None → FakeAdapter
+            event_sink=agent_event_sink,
+        )
 
     # ---- 异常处理 ----
     @app.exception_handler(ApiError)

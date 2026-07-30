@@ -130,6 +130,28 @@ class OpenAIAdapter:
         max_tokens: int | None = None,
     ) -> ModelCallResult[T]:
         """调用模型并返回结构化输出。包含重试、超时、JSON 修复。"""
+        # 演示缓存模式
+        from apps.api.services.demo_cache import get_demo_cache, is_demo_mode
+        if is_demo_mode():
+            cache = get_demo_cache()
+            cached = cache.get(agent, prompt_version, messages)
+            if cached is not None:
+                logger.info(
+                    "demo cache hit agent=%s prompt=%s", agent, prompt_version,
+                )
+                output = output_schema(**cached)
+                return ModelCallResult(
+                    output=output, provider="demo-cache", model="cached",
+                    input_tokens=0, output_tokens=0, latency_ms=0,
+                    estimated_cost_cny=0.0,
+                )
+            raise ModelGatewayError(
+                "DEMO_CACHE_MISS",
+                f"演示缓存未命中 (agent={agent}, prompt={prompt_version})。"
+                "请先以实时模式运行并填充缓存。",
+                retryable=False,
+            )
+
         if not self.base_url or not self.api_key or not self.model:
             raise ModelGatewayError(
                 "MODEL_CONFIG_MISSING",
@@ -158,6 +180,13 @@ class OpenAIAdapter:
                     run_id, agent, self.model, self.provider,
                     input_tokens, output_tokens, latency, cost if cost >= 0 else -1,
                 )
+                # 填充演示缓存（实时模式成功后，缓存公开 DTO 供后续演示使用）
+                try:
+                    from apps.api.services.demo_cache import get_demo_cache
+                    cache = get_demo_cache()
+                    cache.set(agent, prompt_version, messages, result.model_dump())
+                except Exception:
+                    pass  # 缓存写入失败不影响主流程
                 return ModelCallResult(
                     output=result,
                     provider=self.provider,
@@ -199,16 +228,25 @@ class OpenAIAdapter:
         temperature: float | None,
         max_tokens: int | None,
     ) -> dict[str, Any]:
+        # 将 JSON Schema 注入 system prompt（DashScope 不支持 json_schema）
+        import json as _json
+        schema_text = _json.dumps(
+            output_schema.model_json_schema(), ensure_ascii=False,
+        )
+        schema_hint = (
+            "请只输出合法 JSON，不要输出 Markdown 代码块或解释文字。"
+            f"输出必须符合以下 JSON Schema：\n{schema_text}"
+        )
+        msg_list = [m.model_dump() for m in messages]
+        if msg_list and msg_list[0]["role"] == "system":
+            msg_list[0]["content"] = f"{msg_list[0]['content']}\n\n{schema_hint}"
+        else:
+            msg_list.insert(0, {"role": "system", "content": schema_hint})
+
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": [m.model_dump() for m in messages],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": output_schema.__name__,
-                    "schema": output_schema.model_json_schema(),
-                },
-            },
+            "messages": msg_list,
+            "response_format": {"type": "json_object"},
         }
         if temperature is not None:
             body["temperature"] = temperature
@@ -346,6 +384,24 @@ class FakeAdapter:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> ModelCallResult[T]:
+        # 演示缓存模式（与 OpenAIAdapter 行为一致）
+        from apps.api.services.demo_cache import get_demo_cache, is_demo_mode
+        if is_demo_mode():
+            cache = get_demo_cache()
+            cached = cache.get(agent, prompt_version, messages)
+            if cached is not None:
+                output = output_schema(**cached)
+                return ModelCallResult(
+                    output=output, provider="demo-cache", model="cached",
+                    input_tokens=0, output_tokens=0, latency_ms=0,
+                    estimated_cost_cny=0.0,
+                )
+            raise ModelGatewayError(
+                "DEMO_CACHE_MISS",
+                f"演示缓存未命中 (agent={agent}, prompt={prompt_version})。",
+                retryable=False,
+            )
+
         self.call_count += 1
         self.last_call = {
             "run_id": run_id, "agent": agent, "prompt_version": prompt_version,

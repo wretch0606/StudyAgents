@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers
 revision: str = '009'
-down_revision: Union[str, None] = '008_wrong_book_fields'
+down_revision: str | None = '008'
 branch_labels: Union[Sequence[str], None] = None
 depends_on: Union[Sequence[str], None] = None
 
@@ -21,8 +21,8 @@ def upgrade() -> None:
     # document_pages
     op.create_table(
         'document_pages',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('document_id', sa.String(), nullable=False),
+        sa.Column('id', postgresql.UUID(), nullable=False),
+        sa.Column('document_id', postgresql.UUID(), nullable=False),
         sa.Column('page_no', sa.Integer(), nullable=False),
         sa.Column('raw_text', sa.Text(), nullable=True),
         sa.Column('image_path', sa.String(1024), nullable=True),
@@ -41,8 +41,8 @@ def upgrade() -> None:
     # knowledge_chunks
     op.create_table(
         'knowledge_chunks',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('document_id', sa.String(), nullable=False),
+        sa.Column('id', postgresql.UUID(), nullable=False),
+        sa.Column('document_id', postgresql.UUID(), nullable=False),
         sa.Column('page_from', sa.Integer(), nullable=False),
         sa.Column('page_to', sa.Integer(), nullable=False),
         sa.Column('question_no', sa.String(32), nullable=True),

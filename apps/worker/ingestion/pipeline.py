@@ -7,17 +7,12 @@
 每个阶段持久化进度，支持断点续跑。
 """
 
+import hashlib
 import logging
 import uuid
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from apps.api.db.session import _get_sessionmaker
-from apps.api.db.models.document import Document
-from apps.api.db.models.document_page import DocumentPage
-from apps.api.db.models.knowledge_chunk import KnowledgeChunk
 from apps.worker.ingestion.chunker import Chunker
 from apps.worker.ingestion.job_manager import JobManager
 from apps.worker.ingestion.keyword_indexer import KeywordIndexer
@@ -44,6 +39,7 @@ class IngestionPipeline:
         job_manager: JobManager,
         retriever: HybridRetriever | None = None,
         ocr_engine: OCRInterface | None = None,
+        db_session: Any | None = None,
     ):
         self.job_mgr = job_manager
         self.retriever = retriever or HybridRetriever()
@@ -53,6 +49,7 @@ class IngestionPipeline:
         self.chunker = Chunker()
         self.vectorizer = Vectorizer()
         self.keyword_indexer = KeywordIndexer()
+        self.db_session = db_session
         self._stash: dict[str, dict] = {}  # 生产环境应替换为数据库读写
 
     def _get(self, job_id: str, key: str):
@@ -66,21 +63,25 @@ class IngestionPipeline:
 
     # ---- 主入口 ----
 
-    async def run(self, job: IngestionJob, source_path: str | Path | None = None):
+    async def run(
+        self,
+        job: IngestionJob,
+        source_path: str | Path | None = None,
+    ):
         """执行当前导入阶段，并将真实源文件路径保留到后续阶段。"""
         if source_path is not None:
             self._set(job.job_id, "source_path", str(Path(source_path).resolve()))
         logger.info(f"[{job.job_id}] 开始导入，阶段: {job.stage.value}")
         try:
             dispatch = {
-                IngestionStage.VALIDATING:    self._do_extract,
-                IngestionStage.EXTRACTING:    self._do_extract,
-                IngestionStage.OCR:           self._do_ocr,
-                IngestionStage.STRUCTURING:   self._do_structure,
-                IngestionStage.CHUNKING:      self._do_chunk,
-                IngestionStage.VECTORIZING:   self._do_vectorize,
-                IngestionStage.INDEXING:      self._do_index,
-                IngestionStage.COMPLETING:    self._do_complete,
+                IngestionStage.VALIDATING: self._do_extract,
+                IngestionStage.EXTRACTING: self._do_extract,
+                IngestionStage.OCR: self._do_ocr,
+                IngestionStage.STRUCTURING: self._do_structure,
+                IngestionStage.CHUNKING: self._do_chunk,
+                IngestionStage.VECTORIZING: self._do_vectorize,
+                IngestionStage.INDEXING: self._do_index,
+                IngestionStage.COMPLETING: self._do_complete,
             }
             handler = dispatch.get(job.stage)
             if handler:
@@ -94,7 +95,9 @@ class IngestionPipeline:
             raise
 
     async def run_to_completion(
-        self, job: IngestionJob, source_path: str | Path,
+        self,
+        job: IngestionJob,
+        source_path: str | Path,
     ) -> None:
         """从当前阶段连续运行到完成，防止阶段未推进时无限循环。"""
         for _ in range(8):
@@ -119,45 +122,73 @@ class IngestionPipeline:
         pages = self.parser.parse(str(pdf_path), job.document_id)
         self._set(job.job_id, "pages", pages)
 
-        # 写入 document_pages 表
-        async with _get_sessionmaker()() as db:
-            for p in pages:
-                db.add(DocumentPage(
-                    id=str(uuid.uuid4()),
-                    document_id=job.document_id,
-                    page_no=p.page_no,
-                    raw_text=p.text,
-                    image_path=p.image_path,
-                    char_count=len(p.text),
-                    page_type="digital" if p.is_digital else "scanned",
-                    layout_json=[{
-                        "type": b.block_type.value,
-                        "content": b.content,
-                        "confidence": b.confidence,
-                        "bbox": list(b.bbox),
-                    } for b in p.layout] if p.layout else None,
-                    confidence=p.confidence,
-                ))
-            # 更新文档页数
-            doc = await db.get(Document, job.document_id)
-            if doc:
-                doc.page_count = len(pages)
-                doc.status = "extracting"
-            await db.commit()
+        await self._persist_pages(job.document_id, pages)
 
         await self.job_mgr.update_progress(
-            job.job_id, IngestionStage.OCR,
+            job.job_id,
+            IngestionStage.OCR,
             progress=30.0,
         )
         job.stage = IngestionStage.OCR
+
+    async def _persist_pages(
+        self,
+        document_id: str,
+        pages: list[PageResult],
+    ) -> None:
+        """在生产数据库会话可用时幂等写入页面；纯单元测试不连接数据库。"""
+        if self.db_session is None:
+            return
+
+        from sqlalchemy import delete as sa_delete
+
+        from apps.api.db.models.document import Document
+        from apps.api.db.models.document_page import DocumentPage
+
+        await self.db_session.execute(
+            sa_delete(DocumentPage).where(
+                DocumentPage.document_id == document_id,
+            )
+        )
+        for page in pages:
+            self.db_session.add(
+                DocumentPage(
+                    id=str(uuid.uuid4()),
+                    document_id=document_id,
+                    page_no=page.page_no,
+                    raw_text=page.text,
+                    image_path=page.image_path,
+                    char_count=len(page.text),
+                    page_type="digital" if page.is_digital else "scanned",
+                    layout_json=[
+                        {
+                            "type": block.block_type.value,
+                            "content": block.content,
+                            "confidence": block.confidence,
+                            "bbox": list(block.bbox),
+                        }
+                        for block in page.layout
+                    ]
+                    if page.layout
+                    else None,
+                    confidence=page.confidence,
+                )
+            )
+
+        document = await self.db_session.get(Document, document_id)
+        if document is not None:
+            document.page_count = len(pages)
+            document.status = "extracting"
+        await self.db_session.flush()
 
     async def _do_ocr(self, job: IngestionJob):
         pages: list[PageResult] = self._get(job.job_id, "pages") or []
         scanned = sum(1 for p in pages if not p.is_digital)
         await self.job_mgr.update_progress(
-            job.job_id, IngestionStage.STRUCTURING,
+            job.job_id,
+            IngestionStage.STRUCTURING,
             progress=40.0,
-            error=f"OCR 阶段: 扫描页 {scanned}/{len(pages)}"
+            error=f"OCR 阶段: 扫描页 {scanned}/{len(pages)}",
         )
         job.stage = IngestionStage.STRUCTURING
 
@@ -173,9 +204,10 @@ class IngestionPipeline:
         secs = sum(len(p.sections) for p in structured)
         tabs = sum(len(p.tables) for p in structured)
         await self.job_mgr.update_progress(
-            job.job_id, IngestionStage.CHUNKING,
+            job.job_id,
+            IngestionStage.CHUNKING,
             progress=55.0,
-            error=f"结构化: {secs} 节, {tabs} 表格"
+            error=f"结构化: {secs} 节, {tabs} 表格",
         )
         job.stage = IngestionStage.CHUNKING
 
@@ -187,33 +219,68 @@ class IngestionPipeline:
         chunks: list[Chunk] = self.chunker.chunk_document(job.document_id, structured)
         self._set(job.job_id, "chunks", chunks)
 
-        # 写入 knowledge_chunks 表
-        async with async_session_factory() as db:
-            for c in chunks:
-                db.add(KnowledgeChunk(
-                    id=c.chunk_id,
-                    document_id=c.document_id,
-                    page_from=c.page_from,
-                    page_to=c.page_to,
-                    question_no=c.question_no,
-                    section_path=" > ".join(c.section_path) if c.section_path else None,
-                    content=c.content,
-                    private_content=c.private_content,
-                    content_hash=c.content_hash,
-                    visibility=c.visibility.value if hasattr(c.visibility, 'value') else str(c.visibility),
-                    material_type=c.material_type.value if hasattr(c.material_type, 'value') else str(c.material_type),
-                    year=c.year,
-                    image_refs=c.image_refs if c.image_refs else None,
-                    embedding_version=c.content_version,
-                ))
-            await db.commit()
+        await self._persist_chunks(job.document_id, chunks)
 
         await self.job_mgr.update_progress(
-            job.job_id, IngestionStage.VECTORIZING,
-            progress=70.0,
-            error=f"切块: {len(chunks)} 块"
+            job.job_id, IngestionStage.VECTORIZING, progress=70.0, error=f"切块: {len(chunks)} 块"
         )
         job.stage = IngestionStage.VECTORIZING
+
+    async def _persist_chunks(
+        self,
+        document_id: str,
+        chunks: list[Chunk],
+    ) -> None:
+        """在生产数据库会话可用时幂等写入知识块。"""
+        if self.db_session is None:
+            return
+
+        from sqlalchemy import delete as sa_delete
+
+        from apps.api.db.models.knowledge_chunk import KnowledgeChunk
+
+        await self.db_session.execute(
+            sa_delete(KnowledgeChunk).where(
+                KnowledgeChunk.document_id == document_id,
+            )
+        )
+        for chunk in chunks:
+            visibility = (
+                chunk.visibility.value
+                if hasattr(chunk.visibility, "value")
+                else str(chunk.visibility)
+            )
+            material_type = (
+                chunk.material_type.value
+                if hasattr(chunk.material_type, "value")
+                else str(chunk.material_type)
+            )
+            content_version = getattr(chunk, "content_version", None)
+            content_hash = (
+                getattr(chunk, "content_hash", None)
+                or hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+            )
+            self.db_session.add(
+                KnowledgeChunk(
+                    id=chunk.chunk_id,
+                    document_id=chunk.document_id,
+                    page_from=chunk.page_from,
+                    page_to=chunk.page_to,
+                    question_no=getattr(chunk, "question_no", None),
+                    section_path=(" > ".join(chunk.section_path) if chunk.section_path else None),
+                    content=chunk.content,
+                    private_content=getattr(chunk, "private_content", None),
+                    content_hash=content_hash,
+                    visibility=visibility,
+                    material_type=material_type,
+                    year=getattr(chunk, "year", None),
+                    image_refs=getattr(chunk, "image_refs", None),
+                    embedding_version=(
+                        str(content_version) if content_version is not None else None
+                    ),
+                )
+            )
+        await self.db_session.flush()
 
     async def _do_vectorize(self, job: IngestionJob):
         chunks: list[Chunk] = self._get(job.job_id, "chunks") or []
@@ -224,7 +291,8 @@ class IngestionPipeline:
         self._set(job.job_id, "embeddings", embeddings)
 
         await self.job_mgr.update_progress(
-            job.job_id, IngestionStage.INDEXING,
+            job.job_id,
+            IngestionStage.INDEXING,
             progress=85.0,
         )
         job.stage = IngestionStage.INDEXING
@@ -241,9 +309,7 @@ class IngestionPipeline:
         await self.retriever.set_doc_names({job.document_id: f"文档-{job.document_id[:8]}"})
 
         await self.job_mgr.update_progress(
-            job.job_id, IngestionStage.COMPLETING,
-            progress=95.0,
-            error=f"索引: {len(chunks)} 块"
+            job.job_id, IngestionStage.COMPLETING, progress=95.0, error=f"索引: {len(chunks)} 块"
         )
         job.stage = IngestionStage.COMPLETING
 
@@ -255,9 +321,10 @@ class IngestionPipeline:
 
 def _find_sample_pdf() -> Path:
     """查找样例 PDF"""
+    _root = Path(__file__).resolve().parent.parent.parent.parent
     candidates = [
-        Path("src/tests/fixtures/sample_lecture.pdf"),
-        Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "sample_lecture.pdf",
+        Path("tests/fixtures/sample_lecture.pdf"),
+        _root / "tests" / "fixtures" / "sample_lecture.pdf",
     ]
     for p in candidates:
         if p.exists():

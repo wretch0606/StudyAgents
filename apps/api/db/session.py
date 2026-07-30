@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from apps.api.config import settings
 
@@ -33,17 +34,27 @@ _sessionmaker = None
 
 
 def _get_engine():
-    """懒初始化 async Engine（单例）。"""
+    """懒初始化 async Engine（单例）。
+
+    测试环境（app_env == "test"）使用 NullPool，避免连接池跨事件循环复用。
+    """
     global _engine
     if _engine is None:
         url = _build_async_url()
-        _engine = create_async_engine(
-            url,
-            echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
-        )
+        if settings.app_env == "test":
+            _engine = create_async_engine(
+                url,
+                echo=False,
+                poolclass=NullPool,
+            )
+        else:
+            _engine = create_async_engine(
+                url,
+                echo=False,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+            )
     return _engine
 
 
@@ -81,6 +92,15 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
 async def get_engine():
     """获取 async Engine（供 Alembic 和测试使用）。"""
     return _get_engine()
+
+
+async def dispose_engine() -> None:
+    """释放全局 engine（测试隔离：在事件循环切换时重置连接池）。"""
+    global _engine, _sessionmaker
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None
+        _sessionmaker = None
 
 
 def session_context() -> AsyncSession:

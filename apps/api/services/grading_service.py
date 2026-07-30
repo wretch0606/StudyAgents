@@ -387,7 +387,7 @@ class GradingService:
             select(MasteryRecord).where(
                 MasteryRecord.user_id == user_id,
                 MasteryRecord.knowledge_point == kp,
-            ),
+            ).with_for_update(),
         )
         m = result.scalar_one_or_none()
         if m is None:

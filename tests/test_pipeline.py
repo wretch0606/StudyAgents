@@ -2,6 +2,7 @@
 导入管线测试 — 错误恢复 + 断点续跑 + 阶段转换
 """
 
+import hashlib
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -131,6 +132,38 @@ class TestStashManagement:
 
         pipeline._clear("job-x")
         assert pipeline._get("job-x", "key") is None
+
+
+class TestDatabasePersistence:
+    """生产环境注入数据库会话时持久化页面和知识块。"""
+
+    @pytest.mark.asyncio
+    async def test_persist_chunks_computes_content_hash(self, mock_job_mgr):
+        from worker.schemas import Chunk
+
+        db_session = MagicMock()
+        db_session.execute = AsyncMock()
+        db_session.flush = AsyncMock()
+        pipeline = IngestionPipeline(
+            job_manager=mock_job_mgr,
+            db_session=db_session,
+        )
+        chunk = Chunk(
+            chunk_id="chunk-001",
+            document_id="test-doc-001",
+            page_from=1,
+            page_to=1,
+            content="数据库系统原理",
+        )
+
+        await pipeline._persist_chunks("test-doc-001", [chunk])
+
+        persisted = db_session.add.call_args.args[0]
+        assert persisted.content_hash == hashlib.sha256(
+            chunk.content.encode("utf-8")
+        ).hexdigest()
+        db_session.execute.assert_awaited_once()
+        db_session.flush.assert_awaited_once()
 
 
 class TestPipelineIntegration:
