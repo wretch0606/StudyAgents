@@ -11,6 +11,7 @@
 // ============================================================
 
 import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { uploadKnowledgeBase } from '../api/upload'
 import type { KnowledgeUploadResponse } from '../api/upload'
 
@@ -133,7 +134,7 @@ async function processFile(file: File): Promise<void> {
     if (t) {
       t.progress = 100
       t.status = 'processing'
-      t.fileId = res.file_id
+      t.fileId = res.document.id
     }
   } catch (err: any) {
     clearInterval(progressTimer)
@@ -151,7 +152,7 @@ function handleFiles(files: FileList | File[]) {
   const fileArr = Array.from(files)
   for (const file of fileArr) {
     if (!isFileAllowed(file)) {
-      // 跳过不支持的文件类型（可通过 ElMessage 提示）
+      ElMessage.warning(`不支持的文件类型 "${file.name}"，已跳过。支持的格式：PDF、DOCX、TXT、Markdown、PNG、JPG`)
       continue
     }
     processFile(file)

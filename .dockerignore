@@ -42,7 +42,6 @@ Dockerfile
 compose.yml
 .dockerignore
 
-# Docs and scripts
-scripts/
+# Docs
 docs/
 *.md

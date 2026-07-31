@@ -3,11 +3,7 @@
 // StudyAgents — 登录页
 //
 // 使用 useUserStore.login() 调用 POST /api/auth/login，
-// 成功后持久化 Bearer Token 到 localStorage 并跳转到首页。
-//
-// Mock 凭据（dev 模式）：
-//   - 任意非空用户名 + 任意密码 → 普通用户 (member)
-//   - admin / admin123            → 管理员 (admin)
+// 成功后持久化 CSRF Token 到 localStorage 并跳转到首页。
 // ============================================================
 
 import { ref } from 'vue'

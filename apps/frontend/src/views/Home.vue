@@ -1,30 +1,32 @@
 <script setup lang="ts">
 // ============================================================
-// StudyAgents — 知识问答主界面（业务重构版）
+// StudyAgents — 知识问答主界面
 //
-// 核心差异点：
+// 核心功能：
 //   1. 左侧：专项训练 / 错题本入口 + 知识掌握度可视化
-//   2. 中间：PDF/OCR 导入入口 + 含拒答场景的 Mock 对话
+//   2. 中间：PDF/OCR 导入入口 + 实时 SSE 流式对话
 //   3. 右侧：四类 Agent 协同工作流 + 文档溯源卡片（SourceRef）
 // ============================================================
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../stores/useChatStore'
+import { useUserStore } from '../stores/useUserStore'
 import { useWrongBookStore } from '../stores/useWrongBookStore'
 import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
-import { uploadChatAttachment } from '../api/upload'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
+import { ElMessage } from 'element-plus'
+import { uploadKnowledgeBase } from '../api/upload'
 import { renderMixedHtml } from '../utils/katex-renderer'
-
 
 // =========================================================
 // 聊天状态（Pinia Store）
 // =========================================================
 
 const chatStore = useChatStore()
+const userStore = useUserStore()
 const wrongBookStore = useWrongBookStore()
 // 仅提取 Home.vue 模板直接使用的状态（AgentDrawer 自行从 Store 读取）
 const { messages, isStreaming, attachments, agentSteps } = storeToRefs(chatStore)
@@ -32,6 +34,8 @@ const { messages, isStreaming, attachments, agentSteps } = storeToRefs(chatStore
 // ---- 页面挂载时发起网络请求获取对话历史 ----
 onMounted(() => {
   chatStore.fetchHistory()
+  loadHistoryList()
+  loadMasteryData()
 })
 
 // =========================================================
@@ -82,6 +86,12 @@ function switchMode(mode: NavMode) {
 /** 是否已进入答题模式（false = 章节选择，true = 答题区） */
 const isTraining = ref(false)
 
+/** 训练创建中（用于按钮 loading 状态） */
+const trainingCreating = ref(false)
+
+/** 当前题目的题干文本（来自后端 createPracticeSession 响应中的 stem） */
+const currentPracticeStem = ref('')
+
 /** 选中的章节 */
 const selectedChapter = ref('')
 
@@ -94,21 +104,35 @@ const selectedDifficulty = ref('')
 /** 选中的题目数量 */
 const selectedCount = ref('5')
 
-/** 开始训练：收集配置参数 → 初始化 Agent 轨迹 → 切换至答题编辑器 */
-function startTraining() {
-  const config = {
-    chapter: selectedChapter.value,
-    type: selectedType.value,
-    difficulty: selectedDifficulty.value,
-    count: selectedCount.value,
-  }
-  console.log('[专项训练] 训练配置参数：', config)
+/** 开始训练：收集配置参数 → 调用后端 API → 成功后切换至答题编辑器 */
+async function startTraining() {
+  if (trainingCreating.value) return
+  trainingCreating.value = true
 
-  isTraining.value = true
-  isSubmitted.value = false
-  evaluationReport.value = null
-  trainingAnswer.value = ''
-  chatStore.initPracticeTraces()
+  try {
+    // 调用真实后端创建训练会话（异步出题）
+    const result = await chatStore.createPracticeSession({
+      chapterIds: [selectedChapter.value],
+      questionTypes: [selectedType.value],
+      difficulty: selectedDifficulty.value,
+      count: Number(selectedCount.value) || 5,
+    })
+
+    if (!result) {
+      // createPracticeSession 内部已 ElMessage.error 提示
+      return
+    }
+
+    // API 成功 → 提取真实题目 stem 并进入答题界面
+    currentPracticeStem.value = result.questionText
+    isTraining.value = true
+    isSubmitted.value = false
+    evaluationReport.value = null
+    trainingAnswer.value = ''
+    console.log('[专项训练] 训练会话已创建:', result)
+  } finally {
+    trainingCreating.value = false
+  }
 }
 
 /** 返回章节选择 */
@@ -117,6 +141,7 @@ function backToSelect() {
   isSubmitted.value = false
   evaluationReport.value = null
   trainingAnswer.value = ''
+  currentPracticeStem.value = ''
   selectedType.value = ''
   selectedDifficulty.value = ''
   chatStore.clearAgentTraces()
@@ -204,10 +229,18 @@ function applyMasteryDegradation(chapter: string, score: number, total: number) 
   overallMastery.value = Math.round((sum / masteryRecords.value.length) * 100) / 100
 }
 
-/** 当前题目题干（纯文本，用于错题本存储） */
+/** 当前题目题干（纯文本，用于错题本存储）
+ *  优先使用后端 API 返回的 stem，回退到 DOM 内容 */
 const currentQuestionText = computed(() => {
-  // 与模板中 .pqc-prompt 内容保持同步（去除 HTML 标签后的纯文本）
-  return '请简述 TCP 拥塞控制中慢启动与拥塞避免两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。'
+  if (currentPracticeStem.value) return currentPracticeStem.value
+  // 回退到 DOM 内容（兼容旧数据）
+  if (typeof document !== 'undefined') {
+    const promptEl = document.querySelector('.pqc-prompt')
+    if (promptEl) {
+      return (promptEl.textContent || '').replace(/<[^>]+>/g, '').trim()
+    }
+  }
+  return ''
 })
 
 /** 提交答案 → 触发 Evaluator 评测 + 低分自动沉淀至错题本 */
@@ -216,12 +249,18 @@ async function submitAnswer() {
   isEvaluating.value = true
 
   try {
-    const report = await chatStore.submitAnswerForEvaluation()
+    const report = await chatStore.submitPracticeAnswer(trainingAnswer.value)
+    if (!report) {
+      // submitPracticeAnswer 返回 null 表示提交失败（已在 Store 内提示错误）
+      return
+    }
     evaluationReport.value = report
     isSubmitted.value = true
 
-    // ---- 错题沉淀：得分 < 80 自动收录 ----
-    if (report.score < 80) {
+    // ---- 错题沉淀：得分率 < 80% 自动收录 ----
+    // 使用百分比而非绝对分值，避免满分较小的题目（如满分10分）误判
+    const scoreRate = report.total > 0 ? report.score / report.total : 0
+    if (scoreRate < 0.8) {
       wrongBookStore.addEntry({
         chapter: selectedChapter.value,
         chapterLabel: chapterLabel.value,
@@ -304,7 +343,8 @@ function retryWrongQuestion(entry: WrongBookEntry) {
 }
 
 // =========================================================
-// 历史会话（Mock）
+// =========================================================
+// 历史会话（来自 GET /api/sessions）
 // =========================================================
 interface HistoryItem {
   id: string
@@ -312,18 +352,45 @@ interface HistoryItem {
   updatedAt: string
 }
 
-const historyList = ref<HistoryItem[]>([
-  { id: 'h1', title: 'TCP 三次握手与四次挥手详解', updatedAt: '10 分钟前' },
-  { id: 'h2', title: 'IP 子网划分与路由聚合', updatedAt: '2 小时前' },
-  { id: 'h3', title: 'HTTP/2 多路复用机制', updatedAt: '昨天' },
-  { id: 'h4', title: '操作系统进程调度算法', updatedAt: '昨天' },
-  { id: 'h5', title: '数据库索引 B+ 树结构', updatedAt: '3 天前' },
-])
+const historyList = ref<HistoryItem[]>([])
+const activeHistoryId = ref('')
 
-const activeHistoryId = ref('h1')
+/** 从后端加载会话历史列表 */
+async function loadHistoryList() {
+  try {
+    const resp = await fetch('/api/sessions')
+    if (!resp.ok) return
+    const data: { items: { id: string; title: string | null; updated_at: string }[] } = await resp.json()
+    historyList.value = data.items.map((s) => ({
+      id: s.id,
+      title: s.title || '未命名会话',
+      updatedAt: formatRelativeTime(s.updated_at),
+    }))
+    if (historyList.value.length > 0) {
+      activeHistoryId.value = historyList.value[0].id
+    }
+  } catch {
+    // 静默失败，保持空列表
+  }
+}
+
+function formatRelativeTime(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return '刚刚'
+  if (diffMin < 60) return `${diffMin} 分钟前`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr} 小时前`
+  const diffDay = Math.floor(diffHr / 24)
+  if (diffDay < 7) return `${diffDay} 天前`
+  return d.toLocaleDateString('zh-CN')
+}
 
 // =========================================================
-// 知识掌握度（Mock — 来自 GET /api/learning-summary）
+// =========================================================
+// 知识掌握度（来自 GET /api/learning-summary）
 // =========================================================
 interface MasteryRecord {
   kpId: string
@@ -331,15 +398,34 @@ interface MasteryRecord {
   mastery: number // 0–1
 }
 
-const masteryRecords = ref<MasteryRecord[]>([
-  { kpId: 'kp1', kpName: 'TCP 协议', mastery: 0.82 },
-  { kpId: 'kp2', kpName: 'IP 与路由', mastery: 0.65 },
-  { kpId: 'kp3', kpName: 'HTTP/HTTPS', mastery: 0.91 },
-  { kpId: 'kp4', kpName: '进程调度', mastery: 0.48 },
-  { kpId: 'kp5', kpName: 'B+ 树索引', mastery: 0.34 },
-])
+const masteryRecords = ref<MasteryRecord[]>([])
+const overallMastery = ref(0)
 
-const overallMastery = ref(0.64)
+/** 从后端加载知识掌握度 */
+async function loadMasteryData() {
+  try {
+    const resp = await fetch('/api/learning-summary')
+    if (!resp.ok) return
+    const data = await resp.json()
+    // 后端 LearningSummary 字段为 mastery_records（非 knowledge_points）
+    const records = data.mastery_records ?? data.knowledge_points
+    if (records) {
+      masteryRecords.value = records.map((kp: { knowledge_point_id: string; knowledge_point_name?: string; mastery: number }) => ({
+        kpId: kp.knowledge_point_id,
+        kpName: kp.knowledge_point_name || kp.knowledge_point_id,
+        mastery: kp.mastery,
+      }))
+    }
+    if (data.overall_mastery != null) {
+      overallMastery.value = data.overall_mastery
+    } else if (masteryRecords.value.length > 0) {
+      const sum = masteryRecords.value.reduce((acc, r) => acc + r.mastery, 0)
+      overallMastery.value = Math.round((sum / masteryRecords.value.length) * 100) / 100
+    }
+  } catch {
+    // 静默失败，保持空状态
+  }
+}
 
 /** 错题本徽标数 — 动态响应 store 实际长度 */
 const pendingWrongCount = computed(() => wrongBookStore.count)
@@ -362,7 +448,7 @@ const chapterLabelMap: Record<string, string> = {
 }
 
 // =========================================================
-// 用户输入 & 发送（已接入 SSE 流式打字机模拟）
+// 用户输入 & 发送（真实后端 SSE 流式问答）
 // =========================================================
 const inputText = ref('')
 const chatContainerRef = ref<InstanceType<typeof import('element-plus').ElScrollbar> | null>(null)
@@ -371,22 +457,44 @@ async function handleSend() {
   const text = inputText.value.trim()
   if (!text || isStreaming.value) return
 
-  // 1. 将用户输入作为新消息加入 Store（含附件）
+  // 1. 拍照当前附件列表（后续 clearAttachments 会清空 store，提前保存引用）
+  const currentAttachments = attachments.value.length > 0 ? [...attachments.value] : undefined
+
+  // 2. 将用户输入作为新消息加入 Store（含附件）
   chatStore.addMessage({
     id: `m${Date.now()}`,
     role: 'user',
     content: text,
     timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-    attachments: attachments.value.length > 0 ? [...attachments.value] : undefined,
+    attachments: currentAttachments,
   })
 
-  // 2. 清空输入框 + 已发送的附件
+  // 3. 清空输入框（附件在请求发送成功后再清除）
   inputText.value = ''
-  chatStore.clearAttachments()
 
-  // 3. 触发纯前端模拟的 SSE 流式打字机回复
-  //    （真实对接后替换为 EventSource / fetch 流读取）
-  await chatStore.simulateStreamingResponse()
+  // 4. 构造发送文本（仅允许小型纯文本附件内联到 user_input）
+  let fullInput = text
+  if (currentAttachments && currentAttachments.length > 0) {
+    const fileRefs = currentAttachments
+      .map((a) => `[文本附件: ${a.fileName}]\n${a.textContent}`)
+      .join('\n\n')
+    fullInput = `${fileRefs}\n\n---\n\n${text}`
+  }
+
+  // 4b. 校验 user_input 长度（后端限制 10000 字符）
+  const MAX_INPUT_CHARS = 10_000
+  if (fullInput.length > MAX_INPUT_CHARS) {
+    ElMessage.warning(
+      `消息总长度 ${fullInput.length} 字符，超过后端限制 ${MAX_INPUT_CHARS} 字符。` +
+      '请缩短文本或移除附件后重新发送。',
+    )
+    return
+  }
+
+  await chatStore.startQa(fullInput)
+
+  // 5. 请求发送成功后，清空已发送的附件
+  chatStore.clearAttachments()
 
   await nextTick()
   scrollToBottom()
@@ -400,57 +508,62 @@ function scrollToBottom() {
 }
 
 // =========================================================
-// 问答附件上传（📎 回形针按钮）
+// 问答附件引用（📎 回形针按钮）
+//
+// 这里只接收小型 .txt / .md 文件并以内联文本发送。
+// PDF 资料请使用旁边的 PDF 按钮上传到课程知识库。
 // =========================================================
 const chatFileInputRef = ref<HTMLInputElement | null>(null)
-const chatUploading = ref(false)
-
-/** 格式化文件大小为可读字符串 */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 /** 点击回形针 → 触发隐藏的 file input */
 function triggerChatUpload() {
   chatFileInputRef.value?.click()
 }
 
-/** 文件选择后 → 上传 → 暂存到 Store */
+/**
+ * 文件选择后 → 读取文件内容并暂存到 Store。
+ *
+ * 仅接收小型纯文本文件，发送时内联到 user_input 中传递给后端。
+ */
 async function handleChatFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
 
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  if (extension !== 'txt' && extension !== 'md') {
+    ElMessage.warning('聊天附件仅支持 TXT 或 Markdown；PDF 请使用左侧 PDF 按钮导入')
+    input.value = ''
+    return
+  }
+
+  const MAX_ATTACHMENT_BYTES = 64 * 1024
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    ElMessage.warning('文本附件不能超过 64 KB')
+    input.value = ''
+    return
+  }
+
+  const textContent = await file.text()
+  const MAX_ATTACHMENT_CHARS = 6_000
+  if (textContent.length > MAX_ATTACHMENT_CHARS) {
+    ElMessage.warning(`文本附件不能超过 ${MAX_ATTACHMENT_CHARS} 个字符`)
+    input.value = ''
+    return
+  }
+
   const localId = `att-${Date.now()}`
 
-  // 先添加到 Store（uploading 状态，显示加载卡片）
+  // 暂存文件元数据 + 实际内容
   chatStore.addAttachment({
     localId,
-    fileUrl: '',
     fileName: file.name,
     fileSize: file.size,
-    uploadStatus: 'uploading',
+    textContent,
   })
 
-  chatUploading.value = true
-  try {
-    const res = await uploadChatAttachment(file)
-    // 上传成功 → 更新状态
-    chatStore.updateAttachment(localId, {
-      fileUrl: res.file_url,
-      fileName: res.file_name,
-      uploadStatus: 'done',
-    })
-  } catch {
-    // 上传失败
-    chatStore.updateAttachment(localId, { uploadStatus: 'failed' })
-  } finally {
-    chatUploading.value = false
-    // 重置 input 以便重复选择同一文件
-    input.value = ''
-  }
+  // 重置 input 以便重复选择同一文件
+  input.value = ''
 }
 
 /** 从待发送列表中移除附件 */
@@ -462,12 +575,42 @@ function removeChatAttachment(localId: string) {
 // PDF 导入
 // =========================================================
 const pdfUploading = ref(false)
+const pdfFileInputRef = ref<HTMLInputElement | null>(null)
 
 function handlePdfImport() {
+  if (!userStore.isAdmin) {
+    ElMessage.warning('仅管理员可以导入课程 PDF')
+    return
+  }
+  pdfFileInputRef.value?.click()
+}
+
+async function handlePdfFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    ElMessage.warning('请选择 PDF 文件')
+    input.value = ''
+    return
+  }
+
   pdfUploading.value = true
-  setTimeout(() => {
+  try {
+    const result = await uploadKnowledgeBase(file)
+    if (result.state === 'duplicate') {
+      ElMessage.info(`“${result.document.name}”已存在，无需重复上传`)
+    } else {
+      ElMessage.success(`“${result.document.name}”已上传，系统正在解析并建立索引`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '上传失败'
+    ElMessage.error(message)
+  } finally {
     pdfUploading.value = false
-  }, 2000)
+    input.value = ''
+  }
 }
 
 // =========================================================
@@ -810,10 +953,11 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               type="primary"
               size="large"
               round
-              :disabled="!selectedChapter || !selectedType || !selectedDifficulty"
+              :loading="trainingCreating"
+              :disabled="!selectedChapter || !selectedType || !selectedDifficulty || trainingCreating"
               @click="startTraining"
             >
-              开始训练
+              {{ trainingCreating ? '创建训练中…' : '开始训练' }}
             </el-button>
           </div>
         </div>
@@ -843,9 +987,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
               <span class="pqc-num">第 1 题</span>
               <span class="pqc-type">综合问答</span>
             </div>
-            <p class="pqc-prompt">
-              请简述 TCP 拥塞控制中<strong>慢启动</strong>与<strong>拥塞避免</strong>两个阶段的区别，并用数学公式描述拥塞窗口（cwnd）在慢启动阶段的增长规律。
-            </p>
+            <p class="pqc-prompt" v-html="renderMixedHtml(currentPracticeStem || '题目加载中…')" />
 
             <!-- 作答区：编辑器 + 实时预览（KaTeXEditor 内置双栏布局） -->
             <KaTeXEditor
@@ -963,13 +1105,13 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                 <div class="pqc-source-grid">
                   <div
                     v-for="ref in evaluationReport.sourceRefs"
-                    :key="ref.refId"
+                    :key="ref.document_id"
                     class="pqc-source-card"
                   >
                     <div class="pqc-source-head">
-                      <span class="pqc-source-badge">[{{ ref.refId }}]</span>
-                      <span class="pqc-source-doc">{{ ref.documentName }}</span>
-                      <span class="pqc-source-page">第 {{ ref.pageNumber }} 页</span>
+                      <span class="pqc-source-badge">[{{ ref.document_id }}]</span>
+                      <span class="pqc-source-doc">{{ ref.document_name }}</span>
+                      <span class="pqc-source-page">第 {{ ref.page_no }} 页</span>
                     </div>
                     <blockquote class="pqc-source-excerpt">
                       "{{ ref.excerpt }}"
@@ -1043,7 +1185,7 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
                       class="citation-chip"
                       :title="getRefById(cid)?.excerpt"
                     >
-                      [{{ cid }}] {{ getRefById(cid)?.documentName }} 第{{ getRefById(cid)?.pageNumber }}页
+                      [{{ cid }}] {{ getRefById(cid)?.document_name }} 第{{ getRefById(cid)?.page_no }}页
                     </span>
                   </div>
 
@@ -1081,35 +1223,34 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           ref="chatFileInputRef"
           type="file"
           class="chat-file-hidden"
-          accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt,.md"
+          accept=".txt,.md,text/plain,text/markdown"
           @change="handleChatFileChange"
         />
+        <input
+          ref="pdfFileInputRef"
+          type="file"
+          class="chat-file-hidden"
+          accept=".pdf,application/pdf"
+          @change="handlePdfFileChange"
+        />
 
-        <!-- 附件卡片区（上传中 / 已上传） -->
+        <!-- 附件卡片区（小型纯文本内容发送时内联到 user_input） -->
         <div v-if="attachments.length > 0" class="attachment-cards">
           <div
             v-for="att in attachments"
             :key="att.localId"
-            :class="['attachment-mini-card', att.uploadStatus]"
+            class="attachment-mini-card"
           >
-            <!-- 上传中：旋转 spinner -->
-            <span v-if="att.uploadStatus === 'uploading'" class="att-spinner"></span>
-            <!-- 已上传：文件图标 -->
-            <svg v-else-if="att.uploadStatus === 'done'" class="att-file-icon" viewBox="0 0 20 20" fill="currentColor">
+            <!-- 文件图标 -->
+            <svg class="att-file-icon" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" />
-            </svg>
-            <!-- 失败：警告图标 -->
-            <svg v-else class="att-file-icon att-error" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
             </svg>
 
             <span class="att-filename">{{ att.fileName }}</span>
-            <span v-if="att.uploadStatus === 'uploading'" class="att-size">{{ formatFileSize(att.fileSize) }}</span>
 
             <!-- 删除按钮 -->
             <button
               class="att-remove"
-              :disabled="att.uploadStatus === 'uploading'"
               @click="removeChatAttachment(att.localId)"
               title="移除附件"
             >
@@ -1131,11 +1272,11 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
             </svg>
-            <span class="btn-import-label">PDF</span>
+            <span class="btn-import-label">{{ pdfUploading ? '上传中' : 'PDF' }}</span>
           </button>
 
           <!-- 📎 附件上传按钮 -->
-          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming || chatUploading" title="上传附件">
+          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming" title="添加文本附件">
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
             </svg>

@@ -3,14 +3,15 @@
 //
 // 职责：
 //   1. 持有对话消息、Agent 工作流状态、文档溯源引用
-//   2. 通过 fetchHistory() 从 GET /api/chat/history 获取初始数据
-//      （dev 模式下由本地 Vite Mock 插件拦截，production 由后端提供）
-//   3. 预留 addMessage / appendStreamChunk / finishStream 为
-//      SSE 流式输出接口
+//   2. 通过 fetchHistory() 从 GET /api/sessions 获取会话历史
+//   3. 通过 startQa() 调用 POST /api/sessions/{id}/qa 发起问答，
+//      再通过 EventSource 连接 GET /api/agent-runs/{run_id}/events
+//      接收 SSE 流式输出
 // ============================================================
 
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 
 // ============================================================
 // 公开类型（供视图层使用）
@@ -30,18 +31,16 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
 }
 
-/** 问答附件（聊天输入框上传，暂存后随用户提问发送） */
+/** 问答附件（聊天输入框暂存，小型纯文本内容随 user_input 发送） */
 export interface ChatAttachment {
   /** 附件临时 ID（本地生成，用于删除操作） */
   localId: string
-  /** 服务端返回的文件 URL */
-  fileUrl: string
   /** 原始文件名 */
   fileName: string
   /** 文件大小（字节） */
   fileSize: number
-  /** 上传状态 */
-  uploadStatus: 'uploading' | 'done' | 'failed'
+  /** 文件的纯文本内容 */
+  textContent: string
 }
 
 /** Agent 工作流步骤 */
@@ -68,19 +67,147 @@ export interface AgentTrace {
   durationMs?: number
 }
 
-/** 文档溯源引用（SourceRef） */
+/** 文档溯源引用（SourceRef）— 对齐后端 SourceRef 契约 */
 export interface SourceRefDisplay {
-  refId: string
-  documentName: string
-  pageNumber: number
+  /** 后端返回 document_id，前端统一用此字段 */
+  document_id: string
+  /** 文档名称 */
+  document_name: string
+  /** 页码 */
+  page_no: number
+  /** 引用摘要 */
   excerpt: string
 }
 
-/** GET /api/chat/history 响应体 */
-interface ChatHistoryResponse {
-  messages: ChatMessage[]
-  agent_steps: AgentStep[]
-  source_refs: SourceRefDisplay[]
+// ============================================================
+// 后端 API 响应类型
+// ============================================================
+
+interface SessionItem {
+  id: string
+  title: string | null
+  thread_id: string
+  created_at: string
+  updated_at: string
+}
+
+interface MessageItem {
+  id: string
+  role: string
+  content: string
+  run_id: string | null
+  sequence_no: number
+  created_at: string
+}
+
+interface SseEvent {
+  id: string
+  run_id: string
+  sequence_no: number
+  agent: string
+  event_type: string
+  status: string
+  summary: string
+  /** 后端原始 SourceRef 数组 — 需经 mapSourceRef 映射为 SourceRefDisplay */
+  source_refs: Record<string, unknown>[]
+  duration_ms: number | null
+}
+
+/** 训练作答提交结果 */
+export interface PracticeSubmitResult {
+  run_id: string
+  event_url: string
+}
+
+/** 训练总结（来自 GET /api/practice/sessions/{id}/summary）
+ *  对齐后端 SessionSummary 契约 */
+export interface PracticeSummary {
+  session_id: string
+  total_score: number
+  total_max_score: number
+  /** 后端字段名：grades（非 grade_info） */
+  grades: Array<{
+    id: string
+    answer_id: string
+    score: number
+    max_score: number
+    confidence: number
+    review_required: boolean
+    explanation: string | null
+    source_refs: SourceRefDisplay[]
+    status: string
+    created_at: string | null
+  }>
+  /** 后端字段名：knowledge_point_performance（非 knowledge_points） */
+  knowledge_point_performance: Array<{
+    knowledge_point_id: string
+    knowledge_point_name: string
+    mastery: number
+    mastery_change: number
+  }>
+  wrong_book_entry_ids: string[]
+  suggestion: string | null
+}
+
+// ============================================================
+// 常量
+// ============================================================
+
+const AGENT_LABEL_MAP: Record<string, string> = {
+  coordinator: '🧠 Coordinator',
+  knowledge: '📚 Knowledge',
+  questioner: '❓ Questioner',
+  evaluator: '⚖️ Evaluator',
+}
+
+const AGENT_DEFAULT_SUMMARIES: Record<string, string> = {
+  coordinator: '等待意图解析…',
+  knowledge: '等待检索请求…',
+  questioner: '等待出题请求…',
+  evaluator: '等待评测请求…',
+}
+
+// ============================================================
+// 训练参数映射
+// ============================================================
+
+/** 前端题型 → 后端 question_types */
+const QUESTION_TYPE_MAP: Record<string, string> = {
+  single: 'choice',
+  multiple: 'choice',
+  essay: 'short_answer',
+  choice: 'choice',
+  fill_blank: 'fill_blank',
+  calculation: 'calculation',
+  short_answer: 'short_answer',
+}
+
+/** 前端难度 → 后端 difficulty (1/2/3) */
+const DIFFICULTY_MAP: Record<string, number> = {
+  easy: 1,
+  medium: 2,
+  hard: 3,
+}
+
+/** 将前端训练参数映射为后端契约格式 */
+function mapTrainingParams(params: {
+  chapterIds: string[]
+  questionTypes: string[]
+  difficulty: string
+  count: number
+}) {
+  const mappedTypes = params.questionTypes
+    .map((t) => QUESTION_TYPE_MAP[t] || t)
+    .filter((t, i, arr) => arr.indexOf(t) === i) // 去重
+
+  const mappedDifficulty = DIFFICULTY_MAP[params.difficulty] ?? 2
+
+  return {
+    chapter_ids: params.chapterIds,
+    question_types: mappedTypes.length > 0 ? mappedTypes : ['short_answer'],
+    difficulty: mappedDifficulty,
+    target_count: params.count,
+  }
 }
 
 // ============================================================
@@ -107,7 +234,7 @@ export const useChatStore = defineStore('chat', () => {
   /** 是否正在加载历史数据 */
   const loading = ref(false)
 
-  /** 是否正在流式生成（供 SSE 阶段使用） */
+  /** 是否正在流式生成（SSE 连接活跃） */
   const isStreaming = ref(false)
 
   /** 当前正在流式追加的助手消息 ID */
@@ -116,8 +243,23 @@ export const useChatStore = defineStore('chat', () => {
   /** 待发送的附件列表（上传完成后暂存，随下次用户提问一起发送） */
   const attachments = ref<ChatAttachment[]>([])
 
-  /** 当前消息的 Agent 实时执行轨迹（流式回复期间逐阶段更新） */
+  /** 当前消息的 Agent 实时执行轨迹（SSE 流式回复期间逐事件更新） */
   const currentAgentTraces = ref<AgentTrace[]>([])
+
+  /** 当前活跃的会话 ID（用于 QA 和消息追加） */
+  const currentSessionId = ref<string | null>(null)
+
+  /** 当前活跃的训练会话 ID（用于提交答案） */
+  const currentPracticeSessionId = ref<string | null>(null)
+
+  /** 当前训练题目 ID（来自创建训练响应） */
+  const currentPracticeItemId = ref<string | null>(null)
+
+  /** 当前训练题目版本号 */
+  const currentPracticeQuestionVersion = ref<string>('1.0')
+
+  /** SSE EventSource 实例（用于中断连接） */
+  let activeEventSource: EventSource | null = null
 
   // ==========================================================
   // Getters
@@ -128,21 +270,19 @@ export const useChatStore = defineStore('chat', () => {
     messages.value.length > 0 ? messages.value[messages.value.length - 1] : null,
   )
 
-  /** 根据 refId 查找引用详情 */
-  function getRefById(refId: string): SourceRefDisplay | undefined {
-    return sourceRefs.value.find((r) => r.refId === refId)
+  /** 根据 document_id 查找引用详情 */
+  function getRefById(documentId: string): SourceRefDisplay | undefined {
+    return sourceRefs.value.find((r) => r.document_id === documentId)
   }
 
   // ==========================================================
-  // Actions
+  // Actions — 初始化
   // ==========================================================
 
   /**
    * 从后端获取对话历史初始化 Store。
    *
-   * dev 模式下被本地 vite-plugin-mock.ts 拦截，
-   * production 模式下请求真实的 GET /api/chat/history。
-   *
+   * 请求 GET /api/sessions 获取会话列表，再取最近会话的消息。
    * 幂等：多次调用不会重复加载（loaded === true 时直接返回）。
    */
   async function fetchHistory(): Promise<void> {
@@ -150,31 +290,50 @@ export const useChatStore = defineStore('chat', () => {
     loading.value = true
 
     try {
-      const response = await fetch('/api/chat/history')
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      // 1. 获取会话列表
+      const sessionsResp = await fetch('/api/sessions')
+      if (!sessionsResp.ok) {
+        throw new Error(`HTTP ${sessionsResp.status}: ${sessionsResp.statusText}`)
       }
-      const data: ChatHistoryResponse = await response.json()
+      const sessionsData: { items: SessionItem[] } = await sessionsResp.json()
 
-      messages.value = data.messages
-      agentSteps.value = data.agent_steps
-      sourceRefs.value = data.source_refs
+      if (sessionsData.items.length > 0) {
+        const session = sessionsData.items[0]
+        currentSessionId.value = session.id
+
+        // 2. 获取最近会话的消息
+        const msgsResp = await fetch(`/api/sessions/${session.id}/messages`)
+        if (msgsResp.ok) {
+          const msgsData: { items: MessageItem[] } = await msgsResp.json()
+          messages.value = msgsData.items.map((m) => ({
+            id: m.id,
+            role: m.role as ChatMessage['role'],
+            content: m.content,
+            timestamp: m.created_at
+              ? new Date(m.created_at).toLocaleTimeString('zh-CN', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })
+              : '',
+          }))
+        }
+      }
+
       loaded.value = true
     } catch (err) {
       console.error('[useChatStore] fetchHistory 失败:', err)
-      // 失败时保持空状态，视图层展示空提示
+      ElMessage.error('对话历史加载失败，请刷新页面重试')
     } finally {
       loading.value = false
     }
   }
 
+  // ==========================================================
+  // Actions — 消息操作
+  // ==========================================================
+
   /**
    * 添加单条消息到对话列表。
-   *
-   * 后续接入 SSE 流式输出时，调用方可以直接 push 完整消息，
-   * 也可以通过 appendStreamChunk / finishStream 实现逐 token 追加。
-   *
-   * @param msg 要添加的消息对象
    */
   function addMessage(msg: ChatMessage): void {
     messages.value.push(msg)
@@ -192,13 +351,11 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 预留：追加流式生成文本片段到当前 assistant 消息。
+   * 追加流式生成文本片段到当前 assistant 消息。
    *
-   * SSE 接入时，每次收到 token 调用此方法：
+   * SSE 收到 token 事件时调用此方法：
    * - 若 streamingMessageId 为 null，先创建新 assistant 消息占位
    * - 否则追加 token 到对应消息的 content
-   *
-   * @param token 单个文本片段
    */
   function appendStreamChunk(token: string): void {
     if (streamingMessageId.value === null) {
@@ -209,7 +366,10 @@ export const useChatStore = defineStore('chat', () => {
         id,
         role: 'assistant',
         content: token,
-        timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+        timestamp: new Date().toLocaleTimeString('zh-CN', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
       })
     } else {
       const msg = messages.value.find((m) => m.id === streamingMessageId.value)
@@ -220,9 +380,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 预留：结束流式生成，绑定引用并清理流式状态。
-   *
-   * @param citationIds 最终关联的引用 ID 列表
+   * 结束流式生成，绑定引用并清理流式状态。
    */
   function finishStream(citationIds?: string[]): void {
     if (streamingMessageId.value) {
@@ -235,364 +393,526 @@ export const useChatStore = defineStore('chat', () => {
     streamingMessageId.value = null
   }
 
+  // ==========================================================
+  // Actions — SSE 流式问答（真实后端）
+  // ==========================================================
+
+  /** 断开当前 SSE 连接 */
+  function disconnectSSE(): void {
+    if (activeEventSource) {
+      activeEventSource.close()
+      activeEventSource = null
+    }
+  }
+
   /**
-   * 模拟 SSE 流式打字机效果 + 多 Agent 协同轨迹（纯前端演示）。
+   * 发起真实问答：POST /api/sessions/{id}/qa → SSE 流式接收。
    *
-   * 1. 在 messages 末尾追加一条空的 assistant 消息，
-   *    然后通过 setInterval 逐字追加测试文本，直到全部输出完毕。
-   * 2. 同时通过 setTimeout 模拟四类 Agent 的接力过程：
-   *    Coordinator（意图解析）→ Knowledge（资料检索）→ Evaluator（证据验证）
-   *    各阶段状态更新写入 currentAgentTraces，驱动 AgentDrawer 时间轴渲染。
+   * 流程：
+   *   1. 确保存在当前会话（没有则创建）
+   *   2. POST /api/sessions/{id}/qa 发起问答，获得 run_id
+   *   3. EventSource 连接 GET /api/agent-runs/{run_id}/events
+   *   4. 解析 SSE 事件：agent 状态更新 → currentAgentTraces
+   *                     token → appendStreamChunk
+   *                     source_refs → sourceRefs
+   *                     run.completed / run.failed → 收尾
    *
-   * 真实 SSE 接入后，替换为 EventSource / fetch 流读取。
-   *
-   * @returns Promise，流式输出完毕后 resolve
+   * @param userInput 用户输入文本（附件文件名已嵌入文本中，如 "[附件: a.pdf]\n\n问题"）
    */
-  function simulateStreamingResponse(): Promise<void> {
+  async function startQa(userInput: string): Promise<void> {
+    // 断开上一轮 SSE（如果有）
+    disconnectSSE()
+
+    // 初始化 Agent 轨迹
+    clearAgentTraces()
+    const traces: AgentTrace[] = [
+      {
+        agentRole: 'coordinator',
+        agentLabel: AGENT_LABEL_MAP.coordinator,
+        status: 'idle',
+        summary: AGENT_DEFAULT_SUMMARIES.coordinator,
+        action: AGENT_DEFAULT_SUMMARIES.coordinator,
+        durationMs: 0,
+      },
+      {
+        agentRole: 'knowledge',
+        agentLabel: AGENT_LABEL_MAP.knowledge,
+        status: 'idle',
+        summary: AGENT_DEFAULT_SUMMARIES.knowledge,
+        action: AGENT_DEFAULT_SUMMARIES.knowledge,
+        durationMs: 0,
+      },
+      {
+        agentRole: 'questioner',
+        agentLabel: AGENT_LABEL_MAP.questioner,
+        status: 'idle',
+        summary: AGENT_DEFAULT_SUMMARIES.questioner,
+        action: AGENT_DEFAULT_SUMMARIES.questioner,
+        durationMs: 0,
+      },
+      {
+        agentRole: 'evaluator',
+        agentLabel: AGENT_LABEL_MAP.evaluator,
+        status: 'idle',
+        summary: AGENT_DEFAULT_SUMMARIES.evaluator,
+        action: AGENT_DEFAULT_SUMMARIES.evaluator,
+        durationMs: 0,
+      },
+    ]
+    currentAgentTraces.value = [...traces]
+
+    try {
+      // 1. 确保有会话
+      if (!currentSessionId.value) {
+        const createResp = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+          body: JSON.stringify({ title: userInput.slice(0, 50) }),
+        })
+        if (!createResp.ok) {
+          throw new Error(`创建会话失败: HTTP ${createResp.status}`)
+        }
+        const session: SessionItem = await createResp.json()
+        currentSessionId.value = session.id
+      }
+
+      // 2. 发起 QA（后端 StartQaRequest 仅接受 user_input + mode）
+      const qaBody: Record<string, unknown> = {
+        user_input: userInput,
+        mode: 'qa',
+      }
+      const qaResp = await fetch(`/api/sessions/${currentSessionId.value}/qa`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+        body: JSON.stringify(qaBody),
+      })
+      if (!qaResp.ok) {
+        throw new Error(`QA 启动失败: HTTP ${qaResp.status}`)
+      }
+      const qaData: { run_id: string; thread_id: string; trace_id: string } = await qaResp.json()
+
+      // 3. 连接 SSE
+      await connectAndStreamSSE(qaData.run_id)
+    } catch (err) {
+      console.error('[useChatStore] startQa 失败:', err)
+      ElMessage.error('问答请求失败，请重试')
+      finishStream()
+    }
+  }
+
+  /**
+   * 连接 SSE 端点并处理事件流。
+   */
+  function connectAndStreamSSE(runId: string): Promise<void> {
     return new Promise((resolve) => {
-      // ========================================================
-      // 阶段 0：清理上轮轨迹 + 初始化 Agent 执行轨迹
-      // ========================================================
+      const eventSource = new EventSource(`/api/agent-runs/${runId}/events`)
+      activeEventSource = eventSource
 
-      // 清除上一轮残留的 Agent 轨迹，避免新旧数据混杂
-      clearAgentTraces()
+      eventSource.onmessage = (event) => {
+        const rawData = event.data
 
-      const traces: AgentTrace[] = [
-        {
-          agentRole: 'coordinator',
-          agentLabel: '🧠 Coordinator',
-          status: 'running',
-          summary: '正在解析用户意图，拆解为可检索的知识点…',
-          action: '解析用户意图，拆解为可检索的知识点…',
-          durationMs: 0,
-        },
-        {
-          agentRole: 'knowledge',
-          agentLabel: '📚 Knowledge',
-          status: 'idle',
-          summary: '等待检索请求',
-          action: '等待检索请求',
-          durationMs: 0,
-        },
-        {
-          agentRole: 'questioner',
-          agentLabel: '❓ Questioner',
-          status: 'idle',
-          summary: '当前为自由问答模式，出题 Agent 处于待命状态',
-          action: '当前为自由问答模式，出题 Agent 处于待命状态',
-          durationMs: 0,
-        },
-        {
-          agentRole: 'evaluator',
-          agentLabel: '⚖️ Evaluator',
-          status: 'idle',
-          summary: '等待验证任务',
-          action: '等待验证任务',
-          durationMs: 0,
-        },
-      ]
-      currentAgentTraces.value = [...traces]
+        try {
+          const evt: SseEvent = JSON.parse(rawData)
 
-      // 提前标记 isStreaming = true，确保 AgentDrawer 的 hasLiveTraces
-      // 在轨迹初始化后立即为 true，不再等待首个 appendStreamChunk（50ms 延迟）
-      isStreaming.value = true
+          // 结构化 JSON 事件 → 仅更新 Agent 轨迹和溯源引用，绝不作为回答正文
+          updateAgentTraceFromSSE(evt)
 
-      // ========================================================
-      // 阶段 1：t ≈ 600ms — Coordinator 完成 → Knowledge 启动
-      // ========================================================
-      setTimeout(() => {
-        traces[0].status = 'succeeded'
-        traces[0].summary = '意图解析完成：识别为计算机网络课程问题，拆解出 TCP 拥塞控制、滑动窗口、慢启动 3 个子主题'
-        traces[0].action = '意图解析完成：识别为计算机网络课程问题，拆解出 TCP 拥塞控制、滑动窗口、慢启动 3 个子主题'
-        traces[0].durationMs = 600
-        traces[1].status = 'running'
-        traces[1].summary = '正在课程资料库中检索相关文档片段…'
-        traces[1].action = '在课程资料库中检索相关文档片段…'
-        currentAgentTraces.value = [...traces]
-      }, 600)
+          // source_refs 更新
+          if (evt.source_refs && evt.source_refs.length > 0) {
+            sourceRefs.value = evt.source_refs.map(mapSourceRef)
+          }
 
-      // ========================================================
-      // 阶段 2：t ≈ 1600ms — Knowledge 完成 → Evaluator 启动
-      // ========================================================
-      setTimeout(() => {
-        traces[1].status = 'succeeded'
-        traces[1].summary = '检索完成：命中 3 个相关文档片段（TCP 拥塞控制 §3.2、滑动窗口 §3.3、慢启动算法 §3.1）'
-        traces[1].action = '检索完成：命中 3 个相关文档片段（TCP 拥塞控制 §3.2、滑动窗口 §3.3、慢启动算法 §3.1）'
-        traces[1].durationMs = 1000
-        // Questioner 始终 idle（自由问答模式不激活）
-        traces[2].status = 'idle'
-        traces[2].summary = '当前为自由问答模式，出题 Agent 处于待命状态'
-        traces[2].action = '当前为自由问答模式，出题 Agent 处于待命状态'
-        traces[2].durationMs = 0
-        traces[3].status = 'running'
-        traces[3].summary = '正在验证检索结果的相关性与证据充分性…'
-        traces[3].action = '验证检索结果的相关性与证据充分性…'
-        currentAgentTraces.value = [...traces]
-      }, 1600)
+          // 终止事件
+          if (evt.event_type === 'run.completed' || evt.event_type === 'run.failed') {
+            archiveAgentSteps()
+            eventSource.close()
+            activeEventSource = null
 
-      // ========================================================
-      // 阶段 3：t ≈ 2400ms — Evaluator 完成，全部 Agent 就绪
-      // ========================================================
-      setTimeout(() => {
-        traces[3].status = 'succeeded'
-        traces[3].summary = '验证通过：3 个片段均与用户问题高度相关，证据充分可作答'
-        traces[3].action = '验证通过：3 个片段均与用户问题高度相关，证据充分可作答'
-        traces[3].durationMs = 800
-        currentAgentTraces.value = [...traces]
-      }, 2400)
+            // 后端在 run 完成后才将 assistant 消息持久化到数据库，
+            // 因此 SSE 事件流中可能不包含最终回答正文。
+            // 若流式占位消息为空（未收到任何非 JSON 文本），先移除避免重复。
+            const sid = streamingMessageId.value
+            if (sid) {
+              const streamMsg = messages.value.find((m) => m.id === sid)
+              if (streamMsg && streamMsg.content.trim().length === 0) {
+                messages.value = messages.value.filter((m) => m.id !== sid)
+                streamingMessageId.value = null
+              }
+            }
 
-      // ========================================================
-      // 文本流式输出（与 Agent 轨迹并行，立即开始）
-      // ========================================================
-      const testText =
-        '您好！这是由纯前端模拟的 SSE 流式打字机效果。' +
-        '在未来的真实对接中，这里将替换为浏览器原生的 EventSource 或 Fetch API 接收流数据。' +
-        '\n\n' +
-        '**关键技术点**：\n' +
-        '1. Coordinator Agent 解析用户意图并调度下游 Agent\n' +
-        '2. Knowledge Agent 在课程资料库中检索相关文档片段\n' +
-        '3. 所有回答均附带 SourceRef 溯源引用，确保可复核\n' +
-        '4. 证据不足时主动拒答，不使用模型通识补全课程事实'
+            // 竞态条件缓解：Agent 图先发布 run.completed 后端才保存消息，
+            // 因此用轮询重试代替单次查询，直到 assistant 消息落库再停止。
+            pollForAssistantMessage().finally(() => {
+              finishStream()
+              resolve()
+            })
+          }
+        } catch {
+          // 非 JSON 消息 → 这才是真正的回答正文流式块（SSE data-only 纯文本行）
+          if (rawData && rawData.trim()) {
+            appendStreamChunk(rawData)
+          }
+        }
+      }
 
-      let index = 0
-      const timer = setInterval(() => {
-        if (index < testText.length) {
-          appendStreamChunk(testText[index])
-          index++
-        } else {
-          clearInterval(timer)
+      eventSource.onerror = () => {
+        // SSE 连接异常 — 可能是 run 已完成但事件丢失
+        // 回退：带重试轮询拉取最新消息
+        eventSource.close()
+        activeEventSource = null
+        pollForAssistantMessage().finally(() => {
           finishStream()
           resolve()
-        }
-      }, 50)
+        })
+      }
     })
   }
 
   /**
-   * 添加附件到待发送列表（上传中状态）。
-   *
-   * @param att 附件信息
+   * 根据 SSE 事件更新对应 Agent 的轨迹状态。
    */
+  function updateAgentTraceFromSSE(evt: SseEvent): void {
+    const traces = currentAgentTraces.value
+    const agentRole = evt.agent as AgentTrace['agentRole']
+    const trace = traces.find((t) => t.agentRole === agentRole)
+    if (!trace) return
+
+    trace.status = evt.status as AgentTrace['status']
+    trace.summary = evt.summary || trace.summary
+    trace.action = evt.summary || trace.action
+    if (evt.duration_ms != null) {
+      trace.durationMs = evt.duration_ms
+    }
+    currentAgentTraces.value = [...traces]
+  }
+
+  /** 将后端 SourceRef 映射为前端 SourceRefDisplay */
+  function mapSourceRef(raw: Record<string, unknown>): SourceRefDisplay {
+    return {
+      document_id: (raw.document_id as string) || (raw.refId as string) || '',
+      document_name: (raw.document_name as string) || (raw.documentName as string) || '',
+      page_no: (raw.page_no as number) ?? (raw.pageNumber as number) ?? 0,
+      excerpt: (raw.excerpt as string) || '',
+    }
+  }
+
+  /** 将 currentAgentTraces 归档到 agentSteps */
+  function archiveAgentSteps(): void {
+    agentSteps.value = currentAgentTraces.value.map((t) => ({
+      agentRole: t.agentRole,
+      agentLabel: t.agentLabel,
+      status: t.status as 'idle' | 'running' | 'succeeded' | 'failed',
+      summary: t.summary,
+      detail: t.action,
+      durationMs: t.durationMs,
+    }))
+  }
+
+  /**
+   * SSE 终止后轮询拉取 assistant 消息，缓解竞态条件。
+   *
+   * 问题：Agent 图先发布 run.completed 事件，后端才将 assistant 消息
+   * 写入数据库。若前端立即查询，可能拿到空结果或缺少最终回答。
+   *
+   * 方案：每隔 POLL_INTERVAL_MS 拉取一次消息列表，直到出现新的
+   * assistant 消息且内容非空，或达到最大重试次数后强制退出。
+   */
+  const POLL_INTERVAL_MS = 300
+  const POLL_MAX_RETRIES = 30 // ~9 秒
+
+  async function pollForAssistantMessage(): Promise<void> {
+    if (!currentSessionId.value) return
+
+    // 清理流式占位消息（临时 ID "stream-xxx"），避免与 API 拉取的持久化消息
+    // 产生重复气泡。必须放在 prevAssistantCount 之前执行——否则 streaming
+    // 消息被计入 prev 后又被移除，导致 count 比较永远不满足退出条件。
+    if (streamingMessageId.value) {
+      messages.value = messages.value.filter(
+        (m) => m.id !== streamingMessageId.value,
+      )
+      streamingMessageId.value = null
+    }
+
+    // 记录轮询开始前已有的 assistant 消息数量，用于判断是否有新消息入库
+    const prevAssistantCount = messages.value.filter(
+      (m) => m.role === 'assistant' && m.content.trim().length > 0,
+    ).length
+
+    for (let attempt = 0; attempt < POLL_MAX_RETRIES; attempt++) {
+      try {
+        const resp = await fetch(`/api/sessions/${currentSessionId.value}/messages`)
+        if (!resp.ok) {
+          // 非 2xx 继续重试（可能后端正在处理）
+          await sleep(POLL_INTERVAL_MS)
+          continue
+        }
+        const data: { items: MessageItem[] } = await resp.json()
+
+        // 合并消息（以 id 去重，保留已有消息不覆盖）
+        const existingIds = new Set(messages.value.map((m) => m.id))
+        for (const m of data.items) {
+          if (!existingIds.has(m.id)) {
+            messages.value.push({
+              id: m.id,
+              role: m.role as ChatMessage['role'],
+              content: m.content,
+              timestamp: m.created_at
+                ? new Date(m.created_at).toLocaleTimeString('zh-CN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : '',
+            })
+          }
+        }
+
+        // 判断是否出现了新的非空 assistant 消息
+        const currentAssistantCount = messages.value.filter(
+          (m) => m.role === 'assistant' && m.content.trim().length > 0,
+        ).length
+        if (currentAssistantCount > prevAssistantCount) {
+          // 新消息已入库，停止轮询
+          return
+        }
+      } catch (err) {
+        console.error(
+          `[useChatStore] pollForAssistantMessage 第 ${attempt + 1} 次失败:`,
+          err,
+        )
+      }
+
+      // 未找到新消息，等待后重试
+      await sleep(POLL_INTERVAL_MS)
+    }
+
+    // 超时兜底：最后一次全量拉取（此时 pullLatestMessages 等价语义）
+    console.warn(
+      '[useChatStore] pollForAssistantMessage 超时，强制退出轮询',
+    )
+  }
+
+  /** Promise-based sleep */
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  // ==========================================================
+  // Actions — 附件管理
+  // ==========================================================
+
   function addAttachment(att: ChatAttachment): void {
     attachments.value.push(att)
   }
 
-  /**
-   * 更新附件状态（上传完成后 → done / failed）。
-   *
-   * @param localId 附件本地 ID
-   * @param updates 要更新的字段
-   */
-  function updateAttachment(
-    localId: string,
-    updates: Partial<ChatAttachment>,
-  ): void {
+  function updateAttachment(localId: string, updates: Partial<ChatAttachment>): void {
     const idx = attachments.value.findIndex((a) => a.localId === localId)
     if (idx !== -1) {
       attachments.value[idx] = { ...attachments.value[idx], ...updates }
     }
   }
 
-  /**
-   * 从待发送列表中移除指定附件。
-   *
-   * @param localId 附件本地 ID
-   */
   function removeAttachment(localId: string): void {
     attachments.value = attachments.value.filter((a) => a.localId !== localId)
   }
 
-  /**
-   * 清空所有待发送附件。
-   */
   function clearAttachments(): void {
     attachments.value = []
   }
 
-  /**
-   * 清空当前 Agent 实时执行轨迹。
-   *
-   * 在开始新一轮流式回复前调用，避免残留上一轮的轨迹数据。
-   */
+  // ==========================================================
+  // Actions — Agent 轨迹
+  // ==========================================================
+
   function clearAgentTraces(): void {
     currentAgentTraces.value = []
   }
 
+  // ==========================================================
+  // Actions — 专项训练（真实后端）
+  // ==========================================================
+
   /**
-   * 专项训练模式 — 初始化 Agent 执行轨迹。
+   * 创建专项训练会话并获取首题。
    *
-   * 训练生命周期：
-   *   Coordinator → Knowledge → Questioner → (用户作答) → Evaluator
+   * 调用 POST /api/practice/sessions，后端同步出题。
    *
-   * 调用时机：用户点击「开始训练」后立即调用。
-   * 此时前三个 Agent 已完成（生成了题目），Evaluator 处于待命状态。
+   * @param chapterIds 章节 ID 列表
+   * @param questionTypes 题型列表
+   * @param difficulty 难度
+   * @param count 出题数量
+   * @returns 训练会话信息（含首题）
    */
-  function initPracticeTraces(): void {
+  async function createPracticeSession(params: {
+    chapterIds: string[]
+    questionTypes: string[]
+    difficulty: string
+    count: number
+  }): Promise<{
+    sessionId: string
+    itemId: string
+    questionVersion: string
+    questionText: string
+    runId: string | null
+    eventUrl: string | null
+  } | null> {
     clearAgentTraces()
 
-    const traces: AgentTrace[] = [
-      {
-        agentRole: 'coordinator',
-        agentLabel: '🧠 Coordinator',
-        status: 'succeeded',
-        summary: '意图解析完成：识别为专项训练请求，已调度 Knowledge Agent 检索课程资料',
-        action: '意图解析完成：识别为专项训练请求，已调度 Knowledge Agent 检索课程资料',
-        durationMs: 420,
-      },
-      {
-        agentRole: 'knowledge',
-        agentLabel: '📚 Knowledge',
-        status: 'succeeded',
-        summary: '检索完成：已从课程资料库提取 3 个相关知识点，交由 Questioner 生成题目',
-        action: '检索完成：已从课程资料库提取 3 个相关知识点，交由 Questioner 生成题目',
-        durationMs: 850,
-      },
-      {
-        agentRole: 'questioner',
-        agentLabel: '❓ Questioner',
-        status: 'succeeded',
-        summary: '题目生成完毕：已基于检索材料生成 1 道综合问答题，等候用户作答',
-        action: '题目生成完毕：已基于检索材料生成 1 道综合问答题，等候用户作答',
-        durationMs: 610,
-      },
-      {
-        agentRole: 'evaluator',
-        agentLabel: '⚖️ Evaluator',
-        status: 'idle',
-        summary: '待命中：等待用户提交答案后进行评测与打分',
-        action: '待命中：等待用户提交答案后进行评测与打分',
-        durationMs: 0,
-      },
-    ]
+    try {
+      const body = mapTrainingParams(params)
+      const resp = await fetch('/api/practice/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) {
+        throw new Error(`创建训练失败: HTTP ${resp.status}`)
+      }
+      const data = await resp.json()
 
-    currentAgentTraces.value = [...traces]
-    // 训练模式下不设置 isStreaming（不触发消息流式输出动画）
+      currentPracticeSessionId.value = data.session?.id ?? null
+      currentPracticeItemId.value = data.session?.current_item?.item_id ?? null
+      currentPracticeQuestionVersion.value = data.session?.current_item?.question_version ?? '1.0'
+
+      // 从训练会话中提取题目信息（后端字段：stem）
+      const currentItem = data.session?.current_item
+      const questionText = currentItem?.stem ?? ''
+
+      return {
+        sessionId: data.session?.id ?? '',
+        itemId: currentPracticeItemId.value ?? '',
+        questionVersion: currentPracticeQuestionVersion.value,
+        questionText,
+        runId: data.run_id ?? null,
+        eventUrl: data.event_url ?? null,
+      }
+    } catch (err) {
+      console.error('[useChatStore] createPracticeSession 失败:', err)
+      ElMessage.error('创建训练失败，请重试')
+      return null
+    }
   }
 
   /**
-   * 专项训练模式 — 提交答案触发 Evaluator 评测。
+   * 提交训练答案并获取评测结果。
    *
-   * 时序：
-   *   1. 立即将 Evaluator 设为 running（摘要：「正在分析作答…」）
-   *   2. ~1.5s 后将 Evaluator 设为 succeeded（摘要含得分 + 解析）
-   *   3. 将成功的 traces 归档到 agentSteps（供历史回放）
+   * 调用 POST /api/practice/sessions/{sessionId}/answers，
+   * 然后通过 SSE 连接获取评测事件，最后拉取总结。
    *
-   * @returns Promise，评测完成后 resolve 评测报告对象
+   * @param answerText 用户作答的原始文本
+   * @param isUncertain 是否标记为不确定
    */
-  function submitAnswerForEvaluation(): Promise<{
+  async function submitPracticeAnswer(answerText: string, isUncertain = false): Promise<{
     score: number
     total: number
     analysis: string
     highlights: string[]
-    /** 评测置信度 (0–1)，表示 Evaluator 对评分的把握 */
     confidence: number
-    /** 评测引用的文档溯源卡片 */
     sourceRefs: SourceRefDisplay[]
-  }> {
-    return new Promise((resolve) => {
-      const traces = currentAgentTraces.value.length > 0
-        ? [...currentAgentTraces.value]
-        : []
+  } | null> {
+    if (!currentPracticeSessionId.value || !currentPracticeItemId.value) {
+      ElMessage.error('训练会话状态异常，请重新开始训练')
+      return null
+    }
 
-      // 确保 Evaluator 存在
-      const evaluator = traces.find((t) => t.agentRole === 'evaluator')
-      if (!evaluator) return
-
-      // ---- 阶段 1：立即切换 Evaluator → running ----
+    // 为当前 Evaluator 标记为运行中
+    const traces = currentAgentTraces.value
+    const evaluator = traces.find((t) => t.agentRole === 'evaluator')
+    if (evaluator) {
       evaluator.status = 'running'
       evaluator.summary = '正在分析作答内容，比对课程知识点，评估回答质量…'
       evaluator.action = '正在分析作答内容，比对课程知识点，评估回答质量…'
-      evaluator.durationMs = 0
       currentAgentTraces.value = [...traces]
-      isStreaming.value = true
+    }
+    isStreaming.value = true
 
-      // ---- 阶段 2：~1.5s 后 Evaluator → succeeded ----
-      setTimeout(() => {
-        evaluator.status = 'succeeded'
-        evaluator.summary = '评测完成：得分 85/100，回答涵盖了核心概念，公式推导存在一处符号错误'
-        evaluator.action = '评测完成：得分 85/100，回答涵盖了核心概念，公式推导存在一处符号错误'
-        evaluator.durationMs = 1500
-        currentAgentTraces.value = [...traces]
-
-        // 归档到 agentSteps（供历史回放）
-        agentSteps.value = traces.map((t) => ({
-          agentRole: t.agentRole,
-          agentLabel: t.agentLabel,
-          status: t.status as 'idle' | 'running' | 'succeeded' | 'failed',
-          summary: t.summary,
-          detail: t.action,
-          durationMs: t.durationMs,
-        }))
-
-        isStreaming.value = false
-
-        // 填充 Mock 溯源引用（供评测报告展示）
-        sourceRefs.value = [
-          {
-            refId: 'S1',
-            documentName: '计算机网络·第3章 运输层',
-            pageNumber: 42,
-            excerpt:
-              '慢启动算法在连接建立或超时后启动，cwnd 初始值为 1 MSS，每收到一个 ACK，cwnd 加倍，呈指数增长，直至达到 ssthresh 阈值后切换至拥塞避免阶段。',
+    try {
+      // 1. 提交答案
+      const idempotencyKey = `${currentPracticeSessionId.value}-${currentPracticeItemId.value}-${Date.now()}`
+      const resp = await fetch(
+        `/api/practice/sessions/${currentPracticeSessionId.value}/answers`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': getCsrfToken(),
+            'X-Idempotency-Key': idempotencyKey,
           },
-          {
-            refId: 'S2',
-            documentName: 'TCP/IP 协议详解·卷1',
-            pageNumber: 287,
-            excerpt:
-              '拥塞避免阶段中，cwnd 每 RTT 线性增长 1 MSS，即 $cwnd_{new} = cwnd + MSS \\cdot (MSS / cwnd)$。当检测到丢包时，ssthresh 设为当前 cwnd 的一半。',
-          },
-          {
-            refId: 'S3',
-            documentName: '计算机网络·第3章 运输层',
-            pageNumber: 45,
-            excerpt:
-              'TCP Tahoe 版本在丢包后 cwnd 降为 1 MSS 重新慢启动；TCP Reno 引入了快速恢复机制，在收到 3 个重复 ACK 时 cwnd 减半而非重置。',
-          },
-        ]
+          body: JSON.stringify({
+            item_id: currentPracticeItemId.value,
+            question_version: currentPracticeQuestionVersion.value,
+            raw_text: answerText,
+            is_uncertain: isUncertain,
+          }),
+        },
+      )
+      if (!resp.ok) {
+        throw new Error(`提交答案失败: HTTP ${resp.status}`)
+      }
+      const submitResult: PracticeSubmitResult = await resp.json()
 
-        resolve({
-          score: 85,
-          total: 100,
-          confidence: 0.88,
-          analysis:
-            '你的回答正确阐述了慢启动（cwnd 指数增长）与拥塞避免（cwnd 线性增长）的核心区别。' +
-            '慢启动阶段 cwnd 公式 $cwnd_{n+1} = 2 \\cdot cwnd_n$ 表意基本正确。' +
-            '建议补充：慢启动阈值（ssthresh）的作用，以及拥塞避免阶段的具体公式 $cwnd_{new} = cwnd + MSS$。' +
-            '整体结构清晰，关键概念准确，达到 85 分水平。',
-          highlights: [
-            '✅ 慢启动与拥塞避免的核心区别表述准确',
-            '✅ cwnd 增长率公式方向正确',
-            '⚠️ 缺少 ssthresh 阈值的说明',
-            '⚠️ 拥塞避免阶段线性增长公式未给出',
-            '📝 建议补充 TCP Tahoe 与 Reno 版本差异',
-          ],
-          sourceRefs: [
-            {
-              refId: 'S1',
-              documentName: '计算机网络·第3章 运输层',
-              pageNumber: 42,
-              excerpt:
-                '慢启动算法在连接建立或超时后启动，cwnd 初始值为 1 MSS，每收到一个 ACK，cwnd 加倍，呈指数增长，直至达到 ssthresh 阈值后切换至拥塞避免阶段。',
-            },
-            {
-              refId: 'S2',
-              documentName: 'TCP/IP 协议详解·卷1',
-              pageNumber: 287,
-              excerpt:
-                '拥塞避免阶段中，cwnd 每 RTT 线性增长 1 MSS。当检测到丢包时，ssthresh 设为当前 cwnd 的一半。',
-            },
-            {
-              refId: 'S3',
-              documentName: '计算机网络·第3章 运输层',
-              pageNumber: 45,
-              excerpt:
-                'TCP Tahoe 版本在丢包后 cwnd 降为 1 MSS 重新慢启动；TCP Reno 引入了快速恢复机制。',
-            },
-          ],
-        })
-      }, 1500)
-    })
+      // 2. 连接 SSE 接收评测事件
+      if (submitResult.event_url) {
+        await connectAndStreamSSE(submitResult.run_id)
+      }
+
+      // 3. 拉取训练总结
+      const summaryResp = await fetch(
+        `/api/practice/sessions/${currentPracticeSessionId.value}/summary`,
+      )
+      if (!summaryResp.ok) {
+        throw new Error(`获取总结失败: HTTP ${summaryResp.status}`)
+      }
+      const summary: PracticeSummary = await summaryResp.json()
+
+      // 4. 整理返回到视图层（后端字段：grades 数组 + knowledge_point_performance）
+      const firstGrade = summary.grades?.[0]
+      if (firstGrade) {
+        // 更新 sourceRefs
+        if (firstGrade.source_refs && firstGrade.source_refs.length > 0) {
+          sourceRefs.value = firstGrade.source_refs
+        }
+
+        // 标记 Evaluator 完成
+        if (evaluator) {
+          evaluator.status = 'succeeded'
+          evaluator.summary = `评测完成：得分 ${firstGrade.score}/${firstGrade.max_score}`
+          evaluator.action = evaluator.summary
+          currentAgentTraces.value = [...currentAgentTraces.value]
+        }
+
+        archiveAgentSteps()
+
+        return {
+          score: firstGrade.score,
+          total: firstGrade.max_score,
+          analysis: firstGrade.explanation ?? summary.suggestion ?? '',
+          highlights: (summary.knowledge_point_performance ?? []).map(
+            (kp) =>
+              `${kp.mastery_change >= 0 ? '✅' : '⚠️'} ${kp.knowledge_point_name}: ${Math.round(kp.mastery * 100)}%`,
+          ),
+          confidence: firstGrade.confidence,
+          sourceRefs: sourceRefs.value,
+        }
+      }
+
+      return null
+    } catch (err) {
+      console.error('[useChatStore] submitPracticeAnswer 失败:', err)
+      ElMessage.error('提交答案失败，请重试')
+      return null
+    } finally {
+      isStreaming.value = false
+    }
+  }
+
+  // ==========================================================
+  // 内部工具
+  // ==========================================================
+
+  /** 从 cookie 或 localStorage 获取 CSRF Token */
+  function getCsrfToken(): string {
+    // 优先从 localStorage 读取（useUserStore 在登录时写入）
+    return localStorage.getItem('authToken') || ''
   }
 
   // ==========================================================
@@ -610,6 +930,8 @@ export const useChatStore = defineStore('chat', () => {
     streamingMessageId,
     attachments,
     currentAgentTraces,
+    currentSessionId,
+    currentPracticeSessionId,
     // getters
     lastMessage,
     getRefById,
@@ -619,13 +941,13 @@ export const useChatStore = defineStore('chat', () => {
     resetMessages,
     appendStreamChunk,
     finishStream,
-    simulateStreamingResponse,
+    startQa,
+    createPracticeSession,
+    submitPracticeAnswer,
     addAttachment,
     updateAttachment,
     removeAttachment,
     clearAttachments,
     clearAgentTraces,
-    initPracticeTraces,
-    submitAnswerForEvaluation,
   }
 })

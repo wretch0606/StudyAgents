@@ -38,6 +38,11 @@ COPY agents/ ./agents/
 COPY c/ ./c/
 COPY contracts/ ./contracts/
 
+# 数据库迁移 & 初始化脚本（CI/E2E 运行时需要）
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+COPY scripts/ ./scripts/
+
 EXPOSE 8000
 
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

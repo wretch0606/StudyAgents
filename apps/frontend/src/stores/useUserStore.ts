@@ -16,7 +16,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { UserInfo, LoginRequest, LoginResponse } from '../types/api'
+import type { UserInfo, LoginRequest } from '../types/api'
 import { loginApi, getCurrentUserApi } from '../api/auth'
 import {
   setBearerToken,
@@ -28,15 +28,6 @@ import {
 /** localStorage 键名 */
 const TOKEN_KEY = 'authToken'
 const USER_KEY = 'authUser'
-
-// ============================================================
-// 扩展登录响应类型（Mock 阶段 token 字段附加在 LoginResponse 上，
-// 真实后端对接后应更新 api.ts 契约）
-// ============================================================
-
-interface LoginResponseWithToken extends LoginResponse {
-  token: string
-}
 
 // ============================================================
 // Store 定义
@@ -84,11 +75,12 @@ export const useUserStore = defineStore('user', () => {
   // ============================================================
 
   /**
-   * 登录：提交凭证 → 持久化 Token → 写入用户信息。
+   * 登录：提交凭证 → 持久化登录标记 → 写入用户信息。
    *
-   * Mock 阶段（dev 模式）：
-   *   - admin / admin123 → 管理员
-   *   - 任意其他非空凭证 → 普通用户 (demo)
+   * 真实后端（Session Cookie 模式）：
+   *   LoginResponse = { user, csrf_token }（无 JWT token 字段）。
+   *   前端用 csrf_token 作为"已登录"标记持久化，
+   *   实际 API 认证依赖 Session Cookie（withCredentials） + X-CSRF-Token 头。
    *
    * @param username 用户名
    * @param password 密码
@@ -101,15 +93,13 @@ export const useUserStore = defineStore('user', () => {
       const request: LoginRequest = { username, password }
       const response = await loginApi(request)
 
-      // 从响应中提取 Bearer Token（Mock 阶段扩展字段）
-      const data = response as LoginResponseWithToken
-      const authToken = data.token
+      // 真实后端 LoginResponse = { user, csrf_token }，不返回 JWT。
+      // 以 csrf_token 作为"已登录"标记持久化到 localStorage，
+      // 保证页面刷新后路由守卫仍能判定 isLoggedIn = true。
+      const authToken = response.csrf_token
 
-      // 持久化 Token 到 localStorage（页面刷新后恢复）
+      // 持久化登录标记到 localStorage（页面刷新后恢复）
       localStorage.setItem(TOKEN_KEY, authToken)
-
-      // 写入内存（请求拦截器从此读取）
-      setBearerToken(authToken)
 
       // 同步写入 CSRF Token（写请求需要 X-CSRF-Token 头）
       setCsrfToken(response.csrf_token)

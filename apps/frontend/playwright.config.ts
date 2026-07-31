@@ -31,10 +31,30 @@ export default defineConfig({
     },
   ],
 
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5173',
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  },
+  webServer: [
+    {
+      // 启动后端服务（postgres + 迁移 + 测试账号 + api + worker）
+      //
+      // CI 首次运行时数据库为空，需依次：
+      //   a) 启动 postgres 并等待就绪
+      //   b) 运行 alembic upgrade head（数据库迁移）
+      //   c) 运行 init_users.py（创建 member_a 等预置测试账号）
+      //   d) 启动 api + worker
+      //
+      // 本地开发环境可复用已有服务（reuseExistingServer）。
+      command: process.env.CI
+        ? 'bash apps/frontend/e2e/setup-backend.sh && docker compose up -d api worker'
+        : 'docker compose up -d postgres api worker',
+      url: 'http://localhost:8080/api/health/live',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      cwd: '../..',
+    },
+    {
+      command: 'npm run dev',
+      url: 'http://localhost:5173',
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+  ],
 })
