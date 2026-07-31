@@ -31,13 +31,7 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
 }
 
-/** 问答附件（聊天输入框暂存，文件内容随 user_input 发送）
- *
- *  文件通过 FileReader 读取为 base64 data URL 后存入 dataUrl，
- *  发送时以 [文件: name.pdf] data:... 形式嵌入 user_input。
- *
- *  注意：后端 POST /api/documents 仅限 admin，
- *  普通成员无法使用独立上传端点，附件内容直接内联到消息文本中。 */
+/** 问答附件（聊天输入框暂存，小型纯文本内容随 user_input 发送） */
 export interface ChatAttachment {
   /** 附件临时 ID（本地生成，用于删除操作） */
   localId: string
@@ -45,10 +39,8 @@ export interface ChatAttachment {
   fileName: string
   /** 文件大小（字节） */
   fileSize: number
-  /** 文件 MIME 类型 */
-  mimeType: string
-  /** 文件内容（base64 data URL），通过 FileReader.readAsDataURL 读取 */
-  dataUrl: string
+  /** 文件的纯文本内容 */
+  textContent: string
 }
 
 /** Agent 工作流步骤 */

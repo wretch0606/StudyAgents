@@ -11,12 +11,14 @@ import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../stores/useChatStore'
+import { useUserStore } from '../stores/useUserStore'
 import { useWrongBookStore } from '../stores/useWrongBookStore'
 import type { WrongBookEntry } from '../stores/useWrongBookStore'
 import type { SourceRefDisplay } from '../stores/useChatStore'
 import AgentDrawer from '../components/AgentDrawer.vue'
 import KaTeXEditor from '../components/KaTeXEditor.vue'
 import { ElMessage } from 'element-plus'
+import { uploadKnowledgeBase } from '../api/upload'
 import { renderMixedHtml } from '../utils/katex-renderer'
 
 // =========================================================
@@ -24,6 +26,7 @@ import { renderMixedHtml } from '../utils/katex-renderer'
 // =========================================================
 
 const chatStore = useChatStore()
+const userStore = useUserStore()
 const wrongBookStore = useWrongBookStore()
 // 仅提取 Home.vue 模板直接使用的状态（AgentDrawer 自行从 Store 读取）
 const { messages, isStreaming, attachments, agentSteps } = storeToRefs(chatStore)
@@ -469,18 +472,16 @@ async function handleSend() {
   // 3. 清空输入框（附件在请求发送成功后再清除）
   inputText.value = ''
 
-  // 4. 构造发送文本（附件内容以 base64 data URL 内联到 user_input）
-  //    后端 POST /api/documents 仅限 admin，StartQaRequest 无 file_ids 字段，
-  //    因此文件内容直接嵌入消息文本中传递。
+  // 4. 构造发送文本（仅允许小型纯文本附件内联到 user_input）
   let fullInput = text
   if (currentAttachments && currentAttachments.length > 0) {
     const fileRefs = currentAttachments
-      .map((a) => `[文件: ${a.fileName}]\n${a.dataUrl}`)
+      .map((a) => `[文本附件: ${a.fileName}]\n${a.textContent}`)
       .join('\n\n')
     fullInput = `${fileRefs}\n\n---\n\n${text}`
   }
 
-  // 4b. 校验 user_input 长度（后端限制 10000 字符，base64 编码后极易超限）
+  // 4b. 校验 user_input 长度（后端限制 10000 字符）
   const MAX_INPUT_CHARS = 10_000
   if (fullInput.length > MAX_INPUT_CHARS) {
     ElMessage.warning(
@@ -509,9 +510,8 @@ function scrollToBottom() {
 // =========================================================
 // 问答附件引用（📎 回形针按钮）
 //
-// 注意：后端 POST /api/documents 仅限 admin，普通成员无法上传文件。
-// 附件通过 FileReader 读取为 base64 data URL 后暂存，
-// 发送时作为 [文件: name.pdf] + data URL 内联到 user_input 中。
+// 这里只接收小型 .txt / .md 文件并以内联文本发送。
+// PDF 资料请使用旁边的 PDF 按钮上传到课程知识库。
 // =========================================================
 const chatFileInputRef = ref<HTMLInputElement | null>(null)
 
@@ -523,34 +523,43 @@ function triggerChatUpload() {
 /**
  * 文件选择后 → 读取文件内容并暂存到 Store。
  *
- * 通过 FileReader 将文件内容读取为 base64 data URL，
- * 发送时内联到 user_input 中传递给后端。
- *
- * 注意：后端 POST /api/documents 仅限 admin，普通成员上传会返回 403。
- * 文件以 data URL 形式嵌入 user_input，大文件可能触发 10000 字符限制。
+ * 仅接收小型纯文本文件，发送时内联到 user_input 中传递给后端。
  */
 async function handleChatFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
 
-  const localId = `att-${Date.now()}`
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  if (extension !== 'txt' && extension !== 'md') {
+    ElMessage.warning('聊天附件仅支持 TXT 或 Markdown；PDF 请使用左侧 PDF 按钮导入')
+    input.value = ''
+    return
+  }
 
-  // 使用 FileReader 读取文件内容为 base64 data URL
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result as string)
-    reader.onerror = () => reject(new Error('文件读取失败'))
-    reader.readAsDataURL(file)
-  })
+  const MAX_ATTACHMENT_BYTES = 64 * 1024
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    ElMessage.warning('文本附件不能超过 64 KB')
+    input.value = ''
+    return
+  }
+
+  const textContent = await file.text()
+  const MAX_ATTACHMENT_CHARS = 6_000
+  if (textContent.length > MAX_ATTACHMENT_CHARS) {
+    ElMessage.warning(`文本附件不能超过 ${MAX_ATTACHMENT_CHARS} 个字符`)
+    input.value = ''
+    return
+  }
+
+  const localId = `att-${Date.now()}`
 
   // 暂存文件元数据 + 实际内容
   chatStore.addAttachment({
     localId,
     fileName: file.name,
     fileSize: file.size,
-    mimeType: file.type,
-    dataUrl,
+    textContent,
   })
 
   // 重置 input 以便重复选择同一文件
@@ -566,9 +575,42 @@ function removeChatAttachment(localId: string) {
 // PDF 导入
 // =========================================================
 const pdfUploading = ref(false)
+const pdfFileInputRef = ref<HTMLInputElement | null>(null)
 
 function handlePdfImport() {
-  ElMessage.info('PDF 导入功能开发中，请通过管理后台的资料管理页上传文档')
+  if (!userStore.isAdmin) {
+    ElMessage.warning('仅管理员可以导入课程 PDF')
+    return
+  }
+  pdfFileInputRef.value?.click()
+}
+
+async function handlePdfFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    ElMessage.warning('请选择 PDF 文件')
+    input.value = ''
+    return
+  }
+
+  pdfUploading.value = true
+  try {
+    const result = await uploadKnowledgeBase(file)
+    if (result.state === 'duplicate') {
+      ElMessage.info(`“${result.document.name}”已存在，无需重复上传`)
+    } else {
+      ElMessage.success(`“${result.document.name}”已上传，系统正在解析并建立索引`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '上传失败'
+    ElMessage.error(message)
+  } finally {
+    pdfUploading.value = false
+    input.value = ''
+  }
 }
 
 // =========================================================
@@ -1181,11 +1223,18 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
           ref="chatFileInputRef"
           type="file"
           class="chat-file-hidden"
-          accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt,.md"
+          accept=".txt,.md,text/plain,text/markdown"
           @change="handleChatFileChange"
         />
+        <input
+          ref="pdfFileInputRef"
+          type="file"
+          class="chat-file-hidden"
+          accept=".pdf,application/pdf"
+          @change="handlePdfFileChange"
+        />
 
-        <!-- 附件卡片区（文件内容已通过 FileReader 读取，发送时内联到 user_input） -->
+        <!-- 附件卡片区（小型纯文本内容发送时内联到 user_input） -->
         <div v-if="attachments.length > 0" class="attachment-cards">
           <div
             v-for="att in attachments"
@@ -1223,11 +1272,11 @@ const quickPrompts = ['解释 TCP 拥塞控制', '对比 HTTP/1.1 与 HTTP/2', '
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
             </svg>
-            <span class="btn-import-label">PDF</span>
+            <span class="btn-import-label">{{ pdfUploading ? '上传中' : 'PDF' }}</span>
           </button>
 
           <!-- 📎 附件上传按钮 -->
-          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming" title="添加附件引用">
+          <button class="btn-attach" @click="triggerChatUpload" :disabled="isStreaming" title="添加文本附件">
             <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
             </svg>

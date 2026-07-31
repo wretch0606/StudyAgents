@@ -31,6 +31,12 @@ export interface KnowledgeUploadResponse {
     created_at?: string
     updated_at?: string
   }
+  duplicate?: {
+    document_id: string
+    name: string
+    sha256?: string
+    status?: string
+  }
   ingestion_job?: {
     id: string
     document_id: string
@@ -79,5 +85,21 @@ export async function uploadKnowledgeBase(
     throw new Error(`上传失败: HTTP ${resp.status}`)
   }
 
-  return resp.json()
+  const data = (await resp.json()) as KnowledgeUploadResponse
+
+  // 重复上传时后端返回 duplicate 而不是 document；在 API 层统一响应结构，
+  // 避免调用方读取 document.name 时崩溃。
+  if (data.state === 'duplicate' && !data.document && data.duplicate) {
+    return {
+      ...data,
+      document: {
+        id: data.duplicate.document_id,
+        name: data.duplicate.name,
+        sha256: data.duplicate.sha256,
+        status: data.duplicate.status,
+      },
+    }
+  }
+
+  return data
 }
